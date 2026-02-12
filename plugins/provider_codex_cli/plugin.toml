@@ -1,0 +1,10 @@
+id = "provider_codex_cli"
+name = "Codex CLI Provider"
+version = "0.1.0"
+kind = "provider"
+entry = "main:register"
+core_api = ">=2.0,<3.0"
+capabilities = ["llm.generate", "tool.call.format.json"]
+requires = []
+lifecycle = "managed"
+trust_level = "verified"

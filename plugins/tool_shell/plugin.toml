@@ -1,0 +1,10 @@
+id = "tool_shell"
+name = "Shell Tool"
+version = "0.1.0"
+kind = "tool"
+entry = "main:register"
+core_api = ">=2.0,<3.0"
+capabilities = ["tool.shell.exec"]
+requires = []
+lifecycle = "managed"
+trust_level = "builtin"

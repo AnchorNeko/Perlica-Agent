@@ -1,0 +1,39 @@
+[model]
+default_provider = "claude"
+
+[providers.claude]
+enabled = true
+backend = "acp"
+
+[providers.claude.adapter]
+command = "/Users/anchorcat/miniconda3/bin/python"
+args = ["-m", "perlica.providers.acp_adapter_server"]
+env_allowlist = []
+
+[providers.claude.acp]
+connect_timeout = 10
+request_timeout = 60
+max_retries = 2
+backoff = "exponential+jitter"
+circuit_breaker_enabled = true
+
+[providers.claude.fallback]
+enabled = false
+
+[runtime]
+max_tool_calls = 8
+context_budget_ratio = 0.8
+max_summary_attempts = 3
+
+[runtime.provider_context_windows]
+claude = 200000
+
+[runtime.logs]
+enabled = true
+format = "jsonl"
+max_file_bytes = 10485760
+max_files = 5
+redaction = "default"
+
+[context]
+default_id = "default"
