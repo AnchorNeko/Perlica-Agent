@@ -150,13 +150,30 @@ def test_claude_provider_structured_output(monkeypatch: pytest.MonkeyPatch):
     assert response.tool_calls == []
 
 
-def test_claude_provider_schema_mismatch(monkeypatch: pytest.MonkeyPatch):
+def test_claude_provider_allows_missing_tool_calls_key(monkeypatch: pytest.MonkeyPatch):
     payload = {
         "type": "result",
         "is_error": False,
         "structured_output": {
             "assistant_text": "done",
             "finish_reason": "stop",
+        },
+    }
+
+    _patch_claude_popen(monkeypatch, stdout=json.dumps(payload), returncode=0)
+
+    provider = ClaudeCLIProvider(binary="claude")
+    response = provider.generate(_request())
+    assert response.assistant_text == "done"
+    assert response.tool_calls == []
+
+
+def test_claude_provider_rejects_missing_finish_reason(monkeypatch: pytest.MonkeyPatch):
+    payload = {
+        "type": "result",
+        "is_error": False,
+        "structured_output": {
+            "assistant_text": "done",
         },
     }
 

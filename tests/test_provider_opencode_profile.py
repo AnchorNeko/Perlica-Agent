@@ -19,6 +19,8 @@ def test_load_settings_with_opencode_profile(isolated_env):
     assert settings.provider_profile.backend == "acp"
     assert settings.provider_adapter_command == "opencode"
     assert settings.provider_adapter_args == ["acp"]
+    assert settings.provider_profile.supports_mcp_config is True
+    assert settings.provider_profile.supports_skill_config is True
 
 
 def test_opencode_profile_can_be_disabled_in_config(isolated_env):

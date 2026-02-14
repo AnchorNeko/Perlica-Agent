@@ -33,6 +33,7 @@ class ACPAdapterServer:
     ) -> None:
         self._active_provider_id: Optional[str] = None
         self._sessions: Dict[str, str] = {}
+        self._session_configs: Dict[str, Dict[str, Any]] = {}
         self._notify = notify
         self._prompt_heartbeat_sec = max(0.1, float(prompt_heartbeat_sec))
         self._interaction_replies: Dict[str, "queue.Queue[InteractionAnswer]"] = {}
@@ -108,6 +109,7 @@ class ACPAdapterServer:
         provider_id = self._resolve_provider_id(params=params, require_initialized=True)
         session_id = str(params.get("session_id") or "").strip() or self._new_session_id()
         self._sessions[session_id] = provider_id
+        self._session_configs[session_id] = self._normalize_session_provider_config(params)
         return {"session_id": session_id}
 
     def _handle_session_prompt(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -125,10 +127,25 @@ class ACPAdapterServer:
             raise ACPServerError(-32602, "messages must be an array")
 
         tools = params.get("tools")
+        if tools is None:
+            tools = []
         if not isinstance(tools, list):
             raise ACPServerError(-32602, "tools must be an array")
 
-        context = params.get("context") if isinstance(params.get("context"), dict) else {}
+        context = dict(params.get("context")) if isinstance(params.get("context"), dict) else {}
+        session_provider_config = self._session_configs.get(session_id, {})
+        if session_provider_config:
+            current_provider_config = (
+                context.get("provider_config")
+                if isinstance(context.get("provider_config"), dict)
+                else {}
+            )
+            merged_provider_config = dict(current_provider_config)
+            for key, value in session_provider_config.items():
+                if key in merged_provider_config:
+                    continue
+                merged_provider_config[key] = value
+            context["provider_config"] = merged_provider_config
         conversation_id = str(params.get("conversation_id") or "").strip() or "acp"
 
         provider = self._providers.get(provider_id)
@@ -211,6 +228,7 @@ class ACPAdapterServer:
         session_id = str(params.get("session_id") or "").strip()
         if session_id:
             self._sessions.pop(session_id, None)
+            self._session_configs.pop(session_id, None)
         return {"closed": True, "session_id": session_id}
 
     def _handle_session_reply(self, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -264,6 +282,17 @@ class ACPAdapterServer:
 
     def _new_session_id(self) -> str:
         return "acp_sess_{0}".format(len(self._sessions) + 1)
+
+    @staticmethod
+    def _normalize_session_provider_config(params: Dict[str, Any]) -> Dict[str, Any]:
+        config: Dict[str, Any] = {}
+        mcp_servers = params.get("mcpServers")
+        if isinstance(mcp_servers, list):
+            config["mcp_servers"] = [item for item in mcp_servers if isinstance(item, dict)]
+        skills = params.get("skills")
+        if isinstance(skills, list):
+            config["skills"] = [item for item in skills if isinstance(item, dict)]
+        return config
 
     def _emit_notification(self, method: str, params: Dict[str, Any]) -> None:
         if self._notify is None:

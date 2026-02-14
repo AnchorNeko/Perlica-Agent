@@ -120,12 +120,26 @@ sequenceDiagram
 - `LLMRequest(conversation_id, messages, tools, context)`
 - `LLMResponse(assistant_text, tool_calls, finish_reason, usage, raw)`
 
+补充约束：
+
+1. Runner 传给 provider 的 `LLMRequest.tools` 固定为空数组。
+2. `LLMRequest.context.provider_config` 是 provider 能力注入入口（如 `mcp_servers`、`skills`）。
+
 ### 4.2 单轮约束（强制）
 
 1. `Runner.run_text()` 只调用一次 `_call_provider()`。
 2. `llm_call_index` 在单次 run 内固定为 `1`。
 3. 禁止“工具执行后再次调用模型”的本地循环。
 4. 禁止自动摘要触发额外模型调用；超预算时仅确定性截断历史。
+
+### 4.2.1 Provider 配置注入（As-Built）
+
+1. Skill 仍参与匹配与事件上报（`skill.selected/skill.skipped`），但不再把 skill prompt 作为 system message 注入。
+2. MCP resources/prompts 不再拼接为 message 文本块注入。
+3. Runner 在 provider 调用前按 provider capability 组装 `context.provider_config`。
+4. 首批 capability 默认矩阵：
+   - `claude`: `supports_mcp_config=true`, `supports_skill_config=true`
+   - `opencode`: `supports_mcp_config=true`, `supports_skill_config=true`
 
 ### 4.3 provider `tool_calls` 本地禁用执行
 
@@ -168,9 +182,17 @@ Perlica 到 provider 的生命周期：
 6. ACPClient 同时兼容两类会话参数：
    - `session_id + messages/tools/context`（内置 Claude adapter 形态）
    - `sessionId + prompt`（OpenCode ACP 官方形态）
-7. `session/prompt` 结果归一化采用“主路径 + 保守回退”：
+7. `session/new` 支持 provider 配置注入字段：
+   - `mcpServers`（来自 `context.provider_config.mcp_servers`）
+   - `skills`（来自 `context.provider_config.skills`）
+   - 当 provider capability `supports_mcp_config=true` 时，`mcpServers` 必须以“数组”形态显式传递；无服务器配置时也传 `[]`，不得传 `undefined`。
+8. 注入字段被拒绝时（仅 `session/new`）允许自动降级继续：
+   - 第一步：去掉 `skills` 重发 `session/new`
+   - 第二步：再去掉 `mcpServers` 重发 `session/new`
+   - 每步必须记录结构化降级事件
+9. `session/prompt` 结果归一化采用“主路径 + 保守回退”：
    - 主路径：标准 `session/update.agent_message_chunk` 文本拼接。
-   - 回退路径：仅从白名单字段提取“用户可见回复文本”（如 `agent_message*` 变体、`result.message/text/content`）。
+   - 回退路径：仅从白名单字段提取“用户可见回复文本”（如 `agent_message*` 变体、`result.message/text/content`，含 `output_text` 等可见块）。
    - 禁止：将 `agent_thought_chunk` 等思考文本作为最终回复输出。
 
 ### 4.6 ACP 交互确认子协议
@@ -248,12 +270,26 @@ Perlica 到 provider 的生命周期：
 4. `model.provider_selected`：
    - `false`：首次启动尚未完成 provider 选择。
    - `true`：默认 provider 已确认，可直接运行。
+5. `providers.<id>.capabilities`：
+   - `supports_mcp_config`：是否注入 `mcp_servers`
+   - `supports_skill_config`：是否注入 `skills`
+   - `tool_execution_mode`：当前默认 `provider_managed`
+   - `injection_failure_policy`：当前默认 `degrade`
+
+### 6.1 系统 Prompt 策略（As-Built）
+
+1. 系统 Prompt 文件来源：`.perlica_config/prompts/system.md`。
+2. Prompt 角色定位为 macOS 电脑管家：把用户意图转成可执行电脑操作。
+3. Prompt 要求“任务自适应”工具选择：shell 与 AppleScript 按任务类型优先。
+4. Prompt 约束 CLI 工具权限默认允许，不因保守策略阻断执行。
+5. Prompt 最高优先约束：系统级高影响操作先确认再执行。
+6. Prompt 失败回报要求结构化：失败原因、命令证据（含退出码/stderr 摘要）、下一步建议。
 
 ---
 
 ## 7. 安全与治理
 
-1. 高风险 shell 命令仍由 policy engine 阻断。
+1. 高风险 shell 命令仍由 policy engine 阻断；系统级动作在用户确认前不执行。
 2. `DISPATCH_ACTIVE` 仍约束“工具必须经 Dispatcher”；但 provider `tool_calls` 路径已被 Runner 层禁用。
 3. Service 入站严格忽略 `from_me`。
 4. 联系人授权优先于 chat_id。

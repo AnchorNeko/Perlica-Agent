@@ -164,16 +164,17 @@ class CodexCLIProvider(BaseProvider):
 
     @staticmethod
     def _build_prompt(req: LLMRequest) -> str:
-        tools_json = json.dumps(req.tools, ensure_ascii=True)
         messages_json = json.dumps(req.messages, ensure_ascii=True)
+        context = req.context if isinstance(req.context, dict) else {}
+        provider_config = context.get("provider_config") if isinstance(context.get("provider_config"), dict) else {}
+        provider_config_json = json.dumps(provider_config, ensure_ascii=True)
 
         return (
             "You are Perlica, a macOS control agent. "
-            "You may use shell tools, AppleScript workflows, skill context, and MCP tools when provided. "
+            "You may use shell tools, AppleScript workflows, skill context, and MCP servers when available. "
             "You are the Perlica provider adapter. "
             "Return exactly one JSON object with keys assistant_text (string), "
-            "tool_calls (array), finish_reason (string). "
-            "Use tool_calls only from the provided tools and include call_id/tool_name/arguments/risk_tier. "
+            "finish_reason (string), and optional tool_calls (array). "
             "No markdown, no extra text. "
-            "Tools: {tools}. Messages: {messages}."
-        ).format(tools=tools_json, messages=messages_json)
+            "Provider config: {provider_config}. Messages: {messages}."
+        ).format(provider_config=provider_config_json, messages=messages_json)

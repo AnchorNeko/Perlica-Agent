@@ -11,6 +11,10 @@ OPENCODE_PROVIDER_ID = "opencode"
 ALLOWED_PROVIDER_IDS = (DEFAULT_PROVIDER_ID, OPENCODE_PROVIDER_ID)
 DEFAULT_PROVIDER_BACKEND = "acp"
 ALLOWED_PROVIDER_BACKENDS = ("acp", "legacy_cli")
+DEFAULT_TOOL_EXECUTION_MODE = "provider_managed"
+ALLOWED_TOOL_EXECUTION_MODES = ("provider_managed",)
+DEFAULT_INJECTION_FAILURE_POLICY = "degrade"
+ALLOWED_INJECTION_FAILURE_POLICIES = ("degrade", "fail")
 DEFAULT_ADAPTER_COMMAND = "python3"
 DEFAULT_ADAPTER_ARGS = ["-m", "perlica.providers.acp_adapter_server"]
 OPENCODE_ADAPTER_COMMAND = "opencode"
@@ -33,16 +37,26 @@ class ProviderProfile:
     acp_backoff: str = "exponential+jitter"
     acp_circuit_breaker_enabled: bool = True
     fallback_enabled: bool = False
+    supports_mcp_config: bool = False
+    supports_skill_config: bool = False
+    tool_execution_mode: str = DEFAULT_TOOL_EXECUTION_MODE
+    injection_failure_policy: str = DEFAULT_INJECTION_FAILURE_POLICY
 
 
 def default_provider_profiles() -> Dict[str, ProviderProfile]:
     """Return default provider profile map for project bootstrap."""
 
-    claude_profile = ProviderProfile(provider_id=DEFAULT_PROVIDER_ID)
+    claude_profile = ProviderProfile(
+        provider_id=DEFAULT_PROVIDER_ID,
+        supports_mcp_config=True,
+        supports_skill_config=True,
+    )
     opencode_profile = ProviderProfile(
         provider_id=OPENCODE_PROVIDER_ID,
         adapter_command=OPENCODE_ADAPTER_COMMAND,
         adapter_args=list(OPENCODE_ADAPTER_ARGS),
+        supports_mcp_config=True,
+        supports_skill_config=True,
     )
     return {
         claude_profile.provider_id: claude_profile,

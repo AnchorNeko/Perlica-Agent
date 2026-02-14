@@ -181,17 +181,26 @@ perlica run "分析这个报错" --context default
 echo "你好，帮我总结日志" | perlica
 ```
 
-## Prompt / Skill / MCP 注入顺序（Prompt Injection Order）
+## Prompt / Provider 配置注入顺序（Prompt + Provider Config Injection Order）
 
-每轮请求按以下顺序注入：  
-Each run injects context in this order:
+每轮请求的消息注入顺序如下：  
+Each run injects message context in this order:
 
 1. `.perlica_config/prompts/system.md`
-2. 匹配的 Skill system prompt 块（selected skill blocks）
-3. MCP resources/prompts 上下文块（MCP context blocks）
-4. 会话历史（超预算时仅确定性截断，不触发模型摘要）  
+2. 会话历史（超预算时仅确定性截断，不触发模型摘要）  
    Session history (deterministic truncation only; no model summary call)
-5. 当前用户输入（current user input）
+3. 当前用户输入（current user input）
+
+provider 配置注入（非 message 注入）：
+
+1. Skill 选择仍执行，但不再把 skill prompt 拼进 `messages`。  
+   Skill selection still runs, but selected skills are no longer injected into `messages`.
+2. MCP resources/prompts 也不再拼接成 message 文本块。  
+   MCP resources/prompts are no longer injected as message text blocks.
+3. Runner 在调用 provider 时，把 `mcp/skill` 注入 `context.provider_config`，并由 provider 按能力消费。  
+   Runner injects `mcp/skill` into `context.provider_config` and provider consumes them by capability.
+4. `LLMRequest.tools` 在 Runner 调用链路固定传空数组，避免诱导 provider 返回本地可执行 tool loop。  
+   `LLMRequest.tools` is always an empty array from Runner to avoid local tool-loop coupling.
 
 关键行为（Key behavior）：
 
@@ -199,6 +208,26 @@ Each run injects context in this order:
   Missing `system.md` raises error and blocks runtime.
 - 会话上下文超预算时，Runner 只做确定性截断并记录 `context.truncated`。  
   When context is over budget, Runner truncates deterministically and emits `context.truncated`.
+- provider 若仍返回 `tool_calls`，Perlica 仅记录 `tool.blocked/tool.result`，不会本地执行。  
+  If provider still returns `tool_calls`, Perlica records blocked evidence only and never dispatches locally.
+
+### 电脑管家 Prompt 策略（macOS Steward Prompt Policy）
+
+Perlica 的系统 Prompt 默认采用“macOS 电脑管家”策略：  
+Perlica system prompt defaults to a macOS steward policy.
+
+1. 定位：将用户意图转成可执行的电脑操作并返回结果。  
+   Role: convert user intent into executable macOS operations and return outcomes.
+2. 自我认知：知道当前 CLI/provider/model；仅在用户询问、诊断或失败排查时输出。  
+   Self-awareness: knows current CLI/provider/model and reports it only when needed.
+3. 工具策略：任务自适应选择工具；终端/文件/系统命令优先 shell，GUI/App 交互优先 AppleScript，必要时组合。  
+   Adaptive tools: shell-first for terminal/file/system commands, AppleScript-first for GUI/app automation, combine when needed.
+4. 权限策略：CLI 工具权限默认允许，不因保守策略阻断执行。  
+   Permission policy: CLI tool permissions are allowed by default.
+5. 最高优先规则：系统级高影响操作（安装/卸载、系统设置、批量删除、安全网络配置等）必须先确认再执行。  
+   Highest priority: high-impact system actions require confirmation before execution.
+6. 失败回报：结构化输出失败原因、执行证据（命令/退出码/stderr 摘要）和下一步修复建议。  
+   Failure reporting is structured with cause, execution evidence, and remediation.
 
 ## MCP（stdio）支持（MCP Support）
 
@@ -264,6 +293,12 @@ circuit_breaker_enabled = true
 [providers.claude.fallback]
 enabled = false
 
+[providers.claude.capabilities]
+supports_mcp_config = true
+supports_skill_config = true
+tool_execution_mode = "provider_managed"
+injection_failure_policy = "degrade"
+
 [providers.opencode]
 enabled = true
 backend = "acp" # acp only
@@ -282,6 +317,12 @@ circuit_breaker_enabled = true
 
 [providers.opencode.fallback]
 enabled = false
+
+[providers.opencode.capabilities]
+supports_mcp_config = true
+supports_skill_config = true
+tool_execution_mode = "provider_managed"
+injection_failure_policy = "degrade"
 ```
 
 可选：若你明确希望使用外部 `cc-acp`，可覆盖为：  
@@ -453,6 +494,12 @@ perlica session new --name demo
   Provider `tool_calls` are recorded for observability only and are not executed locally by Perlica.
 - 当响应包含 `tool_calls` 时，Runner 会发 `tool.blocked(reason=single_call_mode_local_tool_dispatch_disabled)` 与对应 `tool.result(ok=false)`。  
   When `tool_calls` exist, Runner emits `tool.blocked(reason=single_call_mode_local_tool_dispatch_disabled)` and matching `tool.result(ok=false)`.
+- `mcp/skill` 仅在 provider 调用前按 capability 注入 `context.provider_config`；不再以 system message 形式注入。  
+  `mcp/skill` are injected only via `context.provider_config` gated by provider capabilities, not system messages.
+- 对支持 MCP 配置注入的 provider，`session/new` 会显式携带 `mcpServers` 数组；未配置服务器时也传空数组 `[]`，避免 `undefined` 触发参数校验失败。  
+  For providers that support MCP config injection, `session/new` explicitly includes an `mcpServers` array; when no servers are configured, it sends `[]` to avoid validation failures caused by `undefined`.
+- 若 provider 拒绝 `session/new` 注入字段，ACPClient 会自动降级（先去掉 `skills`，再去掉 `mcpServers`）并继续；降级过程有结构化事件。  
+  If provider rejects `session/new` injection fields, ACPClient auto-degrades (drop `skills`, then `mcpServers`) with structured events.
 - Claude 若返回诊断信息但无 assistant 文本，Perlica不会追加第二次模型请求；诊断会作为本轮可见输出或结构化错误上报。  
   If Claude returns diagnostics without assistant text, Perlica does not issue a second model call; diagnostics are surfaced directly.
 - 默认内置 adapter 若启动失败，会在 `doctor` 的 `acp_adapter_status` 里给出诊断。  
@@ -461,6 +508,8 @@ perlica session new --name demo
   If you switch to external `cc-acp`, missing executable fails fast without auto-fallback.
 - `session/prompt` 只允许“用户可见文本字段”回退；若仅有 thought/推理片段且无可见回复文本，会按无效响应失败上报。  
   `session/prompt` fallback is restricted to user-visible fields; thought-only payloads fail as invalid response.
+- 可见文本回退支持结构化 `message/content` 形态（含 `output_text` 等可见块）；`thought/reasoning` 字段始终被过滤，不会外泄。  
+  Visible fallback also supports structured `message/content` shapes (including visible blocks like `output_text`), while `thought/reasoning` fields are always filtered.
 
 ## 诊断与排查（Doctor & Troubleshooting）
 

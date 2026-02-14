@@ -51,6 +51,6 @@ def test_runner_injects_external_system_prompt(tmp_path: Path):
         first = provider.requests[0]
         assert first.messages
         assert first.messages[0]["role"] == "system"
-        assert "macOS control agent" in str(first.messages[0]["content"])
+        assert "macOS computer steward" in str(first.messages[0]["content"])
     finally:
         runtime.close()

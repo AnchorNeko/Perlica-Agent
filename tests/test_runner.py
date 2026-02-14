@@ -74,6 +74,7 @@ def test_runner_no_tool_call_path(isolated_env, tmp_path: Path):
         assert result.assistant_text == "plain response"
         assert result.tool_results == []
         assert len(provider.requests) == 1
+        assert provider.requests[0].tools == []
     finally:
         runtime.close()
 

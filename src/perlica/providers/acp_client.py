@@ -63,16 +63,9 @@ class ACPClient:
                 },
             )
 
-            session_payload = self._send_once(
+            session_payload = self._send_session_new_with_degrade(
                 transport=transport,
                 req=req,
-                method="session/new",
-                params={
-                    "provider_id": self._provider_id,
-                    "conversation_id": req.conversation_id,
-                    "cwd": self._resolve_cwd(req),
-                    "mcpServers": self._resolve_mcp_servers(req),
-                },
             )
             session_id, session_key = self._extract_session_id(session_payload)
             if not session_id:
@@ -597,6 +590,106 @@ class ACPClient:
             },
         )
 
+    def _send_session_new_with_degrade(
+        self,
+        *,
+        transport: StdioACPTransport,
+        req: LLMRequest,
+    ) -> Dict[str, Any]:
+        params = self._build_session_new_params(req)
+        provider_config = self._resolve_provider_config(req)
+        failure_policy = str(provider_config.get("injection_failure_policy") or "degrade").strip().lower()
+        can_degrade = failure_policy == "degrade"
+
+        if not can_degrade:
+            return self._send_once(
+                transport=transport,
+                req=req,
+                method="session/new",
+                params=params,
+            )
+
+        pending_params = dict(params)
+        degrade_steps = [field for field in ("skills", "mcpServers") if field in pending_params]
+        if not degrade_steps:
+            return self._send_once(
+                transport=transport,
+                req=req,
+                method="session/new",
+                params=pending_params,
+            )
+        for step, rejected_field in enumerate(degrade_steps, start=1):
+            try:
+                return self._send_once(
+                    transport=transport,
+                    req=req,
+                    method="session/new",
+                    params=pending_params,
+                )
+            except (ProviderTransportError, ProviderProtocolError) as exc:
+                if not self._is_session_new_injection_rejection(exc):
+                    raise
+                if rejected_field not in pending_params:
+                    raise
+                self._emit(
+                    "acp.session_new.injection_degraded",
+                    {
+                        "provider_id": self._provider_id,
+                        "rejected_field": rejected_field,
+                        "step": step,
+                        "error": str(exc),
+                        "error_type": exc.__class__.__name__,
+                        "code": exc.details.get("code"),
+                        "subtype": str(exc.details.get("subtype") or ""),
+                    },
+                )
+                pending_params = self._drop_session_new_field(pending_params, rejected_field)
+
+        return self._send_once(
+            transport=transport,
+            req=req,
+            method="session/new",
+            params=pending_params,
+        )
+
+    def _build_session_new_params(self, req: LLMRequest) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "provider_id": self._provider_id,
+            "conversation_id": req.conversation_id,
+            "cwd": self._resolve_cwd(req),
+        }
+        mcp_servers = self._resolve_mcp_servers(req)
+        if self._should_include_mcp_servers(req):
+            params["mcpServers"] = mcp_servers
+        skills = self._resolve_skills(req)
+        if skills:
+            params["skills"] = skills
+        return params
+
+    @staticmethod
+    def _drop_session_new_field(params: Dict[str, Any], field: str) -> Dict[str, Any]:
+        reduced = dict(params)
+        reduced.pop(field, None)
+        return reduced
+
+    @staticmethod
+    def _is_session_new_injection_rejection(exc: Exception) -> bool:
+        if not isinstance(exc, (ProviderTransportError, ProviderProtocolError)):
+            return False
+        details = exc.details if hasattr(exc, "details") else {}
+        code = details.get("code")
+        if isinstance(code, int) and code in {-32601, -32602}:
+            return True
+        text = str(exc or "").strip().lower()
+        if not text:
+            return False
+        has_field_hint = any(token in text for token in ("skill", "mcp", "field", "param", "argument"))
+        has_rejection_hint = any(
+            token in text
+            for token in ("unknown", "unsupported", "invalid", "unexpected", "not allowed", "not supported")
+        )
+        return has_field_hint and has_rejection_hint
+
     @staticmethod
     def _resolve_cwd(req: LLMRequest) -> str:
         context = req.context if isinstance(req.context, dict) else {}
@@ -607,22 +700,88 @@ class ACPClient:
 
     @staticmethod
     def _resolve_mcp_servers(req: LLMRequest) -> List[Dict[str, Any]]:
-        context = req.context if isinstance(req.context, dict) else {}
-        mcp_servers = context.get("mcp_servers")
+        provider_config = ACPClient._resolve_provider_config(req)
+        mcp_servers = provider_config.get("mcp_servers")
         if isinstance(mcp_servers, list):
             return [
                 ACPClient._normalize_mcp_server_entry(item, default_name="")
                 for item in mcp_servers
                 if isinstance(item, dict)
             ]
-        if not isinstance(mcp_servers, dict):
+        if isinstance(mcp_servers, dict):
+            items: List[Dict[str, Any]] = []
+            for server_id, raw in mcp_servers.items():
+                if not isinstance(raw, dict):
+                    continue
+                items.append(ACPClient._normalize_mcp_server_entry(raw, default_name=str(server_id)))
+            return items
+
+        # Backward compatibility: old path used context["mcp_servers"].
+        context = req.context if isinstance(req.context, dict) else {}
+        legacy = context.get("mcp_servers")
+        if isinstance(legacy, list):
+            return [
+                ACPClient._normalize_mcp_server_entry(item, default_name="")
+                for item in legacy
+                if isinstance(item, dict)
+            ]
+        if not isinstance(legacy, dict):
             return []
         items: List[Dict[str, Any]] = []
-        for server_id, raw in mcp_servers.items():
+        for server_id, raw in legacy.items():
             if not isinstance(raw, dict):
                 continue
             items.append(ACPClient._normalize_mcp_server_entry(raw, default_name=str(server_id)))
         return items
+
+    @staticmethod
+    def _should_include_mcp_servers(req: LLMRequest) -> bool:
+        provider_config = ACPClient._resolve_provider_config(req)
+        if "mcp_servers" in provider_config:
+            return True
+        context = req.context if isinstance(req.context, dict) else {}
+        return "mcp_servers" in context
+
+    @staticmethod
+    def _resolve_skills(req: LLMRequest) -> List[Dict[str, Any]]:
+        provider_config = ACPClient._resolve_provider_config(req)
+        raw_skills = provider_config.get("skills")
+        if not isinstance(raw_skills, list):
+            return []
+        rows: List[Dict[str, Any]] = []
+        seen_skill_ids: set[str] = set()
+        for raw in raw_skills:
+            if not isinstance(raw, dict):
+                continue
+            skill_id = str(raw.get("skill_id") or raw.get("id") or "").strip()
+            if not skill_id or skill_id in seen_skill_ids:
+                continue
+            seen_skill_ids.add(skill_id)
+            rows.append(
+                {
+                    "id": skill_id,
+                    "name": str(raw.get("name") or "").strip(),
+                    "description": str(raw.get("description") or "").strip(),
+                    "priority": int(raw.get("priority") or 0),
+                    "triggers": [
+                        str(item).strip().lower()
+                        for item in raw.get("triggers", [])
+                        if str(item).strip()
+                    ]
+                    if isinstance(raw.get("triggers"), list)
+                    else [],
+                    "system_prompt": str(raw.get("system_prompt") or "").strip(),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _resolve_provider_config(req: LLMRequest) -> Dict[str, Any]:
+        context = req.context if isinstance(req.context, dict) else {}
+        provider_config = context.get("provider_config")
+        if isinstance(provider_config, dict):
+            return dict(provider_config)
+        return {}
 
     @staticmethod
     def _normalize_mcp_server_entry(raw: Dict[str, Any], default_name: str) -> Dict[str, Any]:
@@ -645,7 +804,9 @@ class ACPClient:
                     continue
                 env_rows.append({"name": key_text, "value": str(item.get("value") or "")})
 
-        name = str(raw.get("name") or default_name or command or "mcp-server").strip()
+        name = str(
+            raw.get("name") or raw.get("server_id") or default_name or command or "mcp-server"
+        ).strip()
         return {
             "name": name,
             "command": command,
@@ -793,20 +954,27 @@ class ACPClient:
             if not isinstance(params, dict):
                 continue
             update = params.get("update")
-            if not isinstance(update, dict):
+            if isinstance(update, dict):
+                update_type = str(update.get("sessionUpdate") or update.get("session_update") or "").strip().lower()
+                if "thought" in update_type:
+                    continue
+                if "message" in update_type:
+                    text = ACPClient._extract_text_from_content_value(update.get("content"))
+                    if text:
+                        parts.append(text)
+                        continue
+                    alt_text = str(update.get("text") or "").strip()
+                    if alt_text:
+                        parts.append(alt_text)
+                    continue
+
+            # Some providers emit user-visible progress text directly under params
+            # without wrapping it into params.update.
+            if ACPClient._dict_looks_thought_like(params):
                 continue
-            update_type = str(update.get("sessionUpdate") or update.get("session_update") or "").strip().lower()
-            if "thought" in update_type:
-                continue
-            if "message" not in update_type:
-                continue
-            text = ACPClient._extract_text_from_content_value(update.get("content"))
+            text = ACPClient._extract_text_from_content_value(params)
             if text:
                 parts.append(text)
-                continue
-            alt_text = str(update.get("text") or "").strip()
-            if alt_text:
-                parts.append(alt_text)
         return "".join(parts).strip()
 
     @staticmethod
@@ -814,13 +982,23 @@ class ACPClient:
         if isinstance(value, str):
             return value.strip()
         if isinstance(value, dict):
-            value_type = str(value.get("type") or "").strip().lower()
-            if value_type and value_type != "text":
+            if ACPClient._dict_looks_thought_like(value):
                 return ""
             text = value.get("text")
             if isinstance(text, str):
                 return text.strip()
-            for key in ("message", "content", "result"):
+            for key in (
+                "assistant_text",
+                "message",
+                "output_text",
+                "text",
+                "content",
+                "result",
+                "output",
+                "value",
+            ):
+                if "thought" in key or "reasoning" in key:
+                    continue
                 nested = value.get(key)
                 nested_text = ACPClient._extract_text_from_content_value(nested)
                 if nested_text:
@@ -834,6 +1012,17 @@ class ACPClient:
                     parts.append(text)
             return "".join(parts).strip()
         return ""
+
+    @staticmethod
+    def _dict_looks_thought_like(value: Dict[str, Any]) -> bool:
+        value_type = str(value.get("type") or value.get("kind") or "").strip().lower()
+        if value_type and ("thought" in value_type or "reasoning" in value_type):
+            return True
+        for key in value.keys():
+            key_text = str(key).strip().lower()
+            if "thought" in key_text or "reasoning" in key_text:
+                return True
+        return False
 
     @staticmethod
     def _collect_tool_calls(notifications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

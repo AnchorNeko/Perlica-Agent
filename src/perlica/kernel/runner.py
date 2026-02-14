@@ -130,6 +130,10 @@ class Runner:
             self._emit_skill_events(skill_selection, conversation_id, run_id, trace_id)
             self._current_skill_count = len(skill_selection.selected)
             self._current_mcp_tools_count = len(self._runtime.mcp_manager.list_tool_specs())
+            provider_config = self._build_provider_config(provider_id, skill_selection)
+            self._current_mcp_context_count = len(
+                [item for item in provider_config.get("mcp_servers", []) if isinstance(item, dict)]
+            )
 
             self._update_progress(
                 "load-context",
@@ -138,17 +142,12 @@ class Runner:
             )
 
             system_prompt = str(getattr(self._runtime, "system_prompt", "") or "")
-            skill_prompt = self._runtime.skill_engine.build_prompt_context(skill_selection.selected)
-            mcp_context_blocks = self._runtime.mcp_prompt_context_blocks()
-            self._current_mcp_context_count = len(mcp_context_blocks)
 
             history_messages, history_records, summary_used, estimated_tokens = self._load_context_messages(
                 session=session,
                 provider_id=provider_id,
                 user_text=text,
                 system_prompt=system_prompt,
-                skill_prompt=skill_prompt,
-                mcp_context_blocks=mcp_context_blocks,
                 conversation_id=conversation_id,
                 run_id=run_id,
                 trace_id=trace_id,
@@ -157,11 +156,6 @@ class Runner:
             messages: List[Dict[str, str]] = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-            if skill_prompt:
-                messages.append({"role": "system", "content": skill_prompt})
-            for block in mcp_context_blocks:
-                if block:
-                    messages.append({"role": "system", "content": block})
             messages.extend(history_messages)
             messages.append({"role": "user", "content": text})
 
@@ -174,7 +168,7 @@ class Runner:
                 conversation_id=conversation_id,
                 run_id=run_id,
                 trace_id=trace_id,
-                tools=self._runtime.tool_specs(),
+                provider_config=provider_config,
             )
 
             persist_entries.append(
@@ -318,8 +312,6 @@ class Runner:
         provider_id: str,
         user_text: str,
         system_prompt: str,
-        skill_prompt: str,
-        mcp_context_blocks: Sequence[str],
         conversation_id: str,
         run_id: str,
         trace_id: str,
@@ -336,8 +328,6 @@ class Runner:
             history_messages=candidate_messages,
             user_text=user_text,
             system_prompt=system_prompt,
-            skill_prompt=skill_prompt,
-            mcp_context_blocks=mcp_context_blocks,
         )
 
         dropped_messages = 0
@@ -349,8 +339,6 @@ class Runner:
                 history_messages=candidate_messages,
                 user_text=user_text,
                 system_prompt=system_prompt,
-                skill_prompt=skill_prompt,
-                mcp_context_blocks=mcp_context_blocks,
             )
 
         if estimated > budget:
@@ -412,7 +400,7 @@ class Runner:
         conversation_id: str,
         run_id: str,
         trace_id: str,
-        tools: List[dict],
+        provider_config: Dict[str, Any],
     ) -> LLMResponse:
         self._llm_call_index += 1
         self._update_progress(
@@ -423,7 +411,6 @@ class Runner:
         req = LLMRequest(
             conversation_id=conversation_id,
             messages=list(messages),
-            tools=tools,
             context={
                 "context_id": self._runtime.context_id,
                 "conversation_id": conversation_id,
@@ -432,8 +419,9 @@ class Runner:
                 "request_id": new_id("req"),
                 "llm_call_index": self._llm_call_index,
                 "cwd": str(self._runtime.workspace_dir),
-                "mcp_servers": self._runtime.mcp_manager.adapter_mcp_servers_payload(),
+                "provider_config": dict(provider_config),
             },
+            tools=[],
         )
 
         self._runtime.emit(
@@ -445,6 +433,7 @@ class Runner:
                 "skills_selected_count": self._current_skill_count,
                 "mcp_tools_count": self._current_mcp_tools_count,
                 "mcp_context_blocks_count": self._current_mcp_context_count,
+                "mcp_provider_config_count": self._current_mcp_context_count,
             },
             conversation_id=conversation_id,
             run_id=run_id,
@@ -559,20 +548,101 @@ class Runner:
         history_messages: Sequence[Dict[str, str]],
         user_text: str,
         system_prompt: str,
-        skill_prompt: str,
-        mcp_context_blocks: Sequence[str],
     ) -> int:
         total = 0
         if system_prompt:
             total += estimate_tokens_from_text(system_prompt)
-        if skill_prompt:
-            total += estimate_tokens_from_text(skill_prompt)
-        for block in mcp_context_blocks:
-            total += estimate_tokens_from_text(str(block or ""))
         for message in history_messages:
             total += estimate_tokens_from_text(str(message.get("content") or ""))
         total += estimate_tokens_from_text(user_text)
         return total
+
+    def _build_provider_config(
+        self,
+        provider_id: str,
+        selection: SkillSelection,
+    ) -> Dict[str, Any]:
+        profile = self._resolve_provider_profile(provider_id)
+        provider_config: Dict[str, Any] = {}
+        if profile is None:
+            return provider_config
+
+        if bool(getattr(profile, "supports_mcp_config", False)):
+            mcp_rows = self._normalize_mcp_server_rows(self._runtime.mcp_manager.adapter_mcp_servers_payload())
+            provider_config["mcp_servers"] = mcp_rows
+
+        if bool(getattr(profile, "supports_skill_config", False)):
+            skill_rows = self._serialize_selected_skills(selection)
+            if skill_rows:
+                provider_config["skills"] = skill_rows
+
+        tool_execution_mode = str(getattr(profile, "tool_execution_mode", "") or "").strip()
+        if tool_execution_mode:
+            provider_config["tool_execution_mode"] = tool_execution_mode
+        injection_failure_policy = str(
+            getattr(profile, "injection_failure_policy", "") or ""
+        ).strip()
+        if injection_failure_policy:
+            provider_config["injection_failure_policy"] = injection_failure_policy
+
+        return provider_config
+
+    def _resolve_provider_profile(self, provider_id: str) -> Optional[Any]:
+        settings = getattr(self._runtime, "settings", None)
+        profiles = getattr(settings, "provider_profiles", {})
+        if isinstance(profiles, dict):
+            profile = profiles.get(provider_id)
+            if profile is not None:
+                return profile
+        active_profile = getattr(settings, "provider_profile", None)
+        if active_profile is not None:
+            return active_profile
+        return None
+
+    @staticmethod
+    def _normalize_mcp_server_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        if not isinstance(payload, dict):
+            return rows
+        for server_id, raw in sorted(payload.items()):
+            if not isinstance(raw, dict):
+                continue
+            row = {
+                "server_id": str(server_id or "").strip(),
+                "command": str(raw.get("command") or "").strip(),
+                "args": [str(item) for item in raw.get("args", []) if str(item).strip()]
+                if isinstance(raw.get("args"), list)
+                else [],
+                "env": dict(raw.get("env") or {}) if isinstance(raw.get("env"), dict) else {},
+            }
+            if row["server_id"] and row["command"]:
+                rows.append(row)
+        return rows
+
+    @staticmethod
+    def _serialize_selected_skills(selection: SkillSelection) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        seen_skill_ids: set[str] = set()
+        for skill in selection.selected:
+            skill_id = str(getattr(skill, "skill_id", "") or "").strip()
+            if not skill_id or skill_id in seen_skill_ids:
+                continue
+            seen_skill_ids.add(skill_id)
+            rows.append(
+                {
+                    "skill_id": skill_id,
+                    "name": str(getattr(skill, "name", "") or "").strip(),
+                    "description": str(getattr(skill, "description", "") or "").strip(),
+                    "priority": int(getattr(skill, "priority", 0) or 0),
+                    "triggers": [
+                        str(item).strip().lower()
+                        for item in list(getattr(skill, "triggers", []) or [])
+                        if str(item).strip()
+                    ],
+                    "system_prompt": str(getattr(skill, "system_prompt", "") or ""),
+                }
+            )
+        return rows
 
     @staticmethod
     def _totals_from_call_usages(usages: Sequence[LLMCallUsage]) -> UsageTotals:

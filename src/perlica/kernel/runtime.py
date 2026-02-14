@@ -483,7 +483,16 @@ class Runtime:
             "skills_errors": len(self.skill_engine.list_errors()),
             "permissions": dict(self.permission_report.get("checks") or {}),
             "system_prompt_loaded": bool(self.system_prompt),
-            "skill_prompt_injection_enabled": True,
+            "skill_prompt_injection_enabled": False,
+            "provider_config_injection_enabled": True,
+            "provider_capabilities": {
+                "supports_mcp_config": bool(self.settings.provider_profile.supports_mcp_config),
+                "supports_skill_config": bool(self.settings.provider_profile.supports_skill_config),
+                "tool_execution_mode": str(self.settings.provider_profile.tool_execution_mode or ""),
+                "injection_failure_policy": str(
+                    self.settings.provider_profile.injection_failure_policy or ""
+                ),
+            },
             "mcp_servers_loaded": self.mcp_report.loaded_servers,
             "mcp_tools_loaded": self.mcp_report.tool_count,
             "mcp_errors": self.mcp_manager.status().get("errors", {}),

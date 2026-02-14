@@ -16,10 +16,14 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for Python 3.9/3.10
 from perlica.providers.profile import (
     ALLOWED_PROVIDER_BACKENDS,
     ALLOWED_PROVIDER_IDS as PROFILE_ALLOWED_PROVIDER_IDS,
+    ALLOWED_INJECTION_FAILURE_POLICIES,
+    ALLOWED_TOOL_EXECUTION_MODES,
     DEFAULT_ADAPTER_ARGS,
     DEFAULT_ADAPTER_COMMAND,
+    DEFAULT_INJECTION_FAILURE_POLICY,
     DEFAULT_PROVIDER_BACKEND,
     DEFAULT_PROVIDER_ID,
+    DEFAULT_TOOL_EXECUTION_MODE,
     ProviderProfile,
     default_provider_profiles,
 )
@@ -98,6 +102,7 @@ class Settings:
     provider_profile: ProviderProfile = field(
         default_factory=lambda: default_provider_profiles()[DEFAULT_PROVIDER_ID]
     )
+    provider_profiles: Dict[str, ProviderProfile] = field(default_factory=default_provider_profiles)
     provider_backend: str = DEFAULT_PROVIDER_BACKEND
     provider_adapter_command: str = DEFAULT_ADAPTER_COMMAND
     provider_adapter_args: List[str] = field(default_factory=lambda: list(DEFAULT_ADAPTER_ARGS))
@@ -286,6 +291,20 @@ def _safe_backoff(value: object, default: str) -> str:
     return text
 
 
+def _safe_tool_execution_mode(value: object, default: str) -> str:
+    candidate = str(value or default).strip().lower()
+    if candidate not in ALLOWED_TOOL_EXECUTION_MODES:
+        return default
+    return candidate
+
+
+def _safe_injection_failure_policy(value: object, default: str) -> str:
+    candidate = str(value or default).strip().lower()
+    if candidate not in ALLOWED_INJECTION_FAILURE_POLICIES:
+        return default
+    return candidate
+
+
 def _resolve_adapter_command(command: str, args: Sequence[str]) -> str:
     text = str(command or "").strip()
     if not text:
@@ -299,49 +318,75 @@ def _resolve_adapter_command(command: str, args: Sequence[str]) -> str:
 
 
 def _safe_provider_profiles(data: Dict[str, object]) -> Dict[str, ProviderProfile]:
+    defaults = default_provider_profiles()
     parsed: Dict[str, ProviderProfile] = {}
     for provider_id in PROFILE_ALLOWED_PROVIDER_IDS:
         raw = data.get(provider_id)
         if not isinstance(raw, dict):
             continue
+        default_profile = defaults.get(provider_id) or ProviderProfile(provider_id=provider_id)
         adapter = raw.get("adapter") if isinstance(raw.get("adapter"), dict) else {}
         acp = raw.get("acp") if isinstance(raw.get("acp"), dict) else {}
         fallback = raw.get("fallback") if isinstance(raw.get("fallback"), dict) else {}
+        capabilities = (
+            raw.get("capabilities") if isinstance(raw.get("capabilities"), dict) else {}
+        )
         profile = ProviderProfile(
             provider_id=provider_id,
-            enabled=_safe_bool(raw.get("enabled"), True),  # type: ignore[arg-type]
-            backend=_normalize_provider_backend(raw.get("backend")),  # type: ignore[arg-type]
-            adapter_command=str(adapter.get("command") or DEFAULT_ADAPTER_COMMAND).strip() or DEFAULT_ADAPTER_COMMAND,  # type: ignore[arg-type]
-            adapter_args=_safe_string_list(adapter.get("args"), DEFAULT_ADAPTER_ARGS),  # type: ignore[arg-type]
-            adapter_env_allowlist=_safe_string_list(adapter.get("env_allowlist"), []),  # type: ignore[arg-type]
+            enabled=_safe_bool(raw.get("enabled"), bool(default_profile.enabled)),  # type: ignore[arg-type]
+            backend=_normalize_provider_backend(  # type: ignore[arg-type]
+                raw.get("backend") if raw.get("backend") is not None else default_profile.backend
+            ),
+            adapter_command=str(adapter.get("command") or default_profile.adapter_command).strip()
+            or default_profile.adapter_command,  # type: ignore[arg-type]
+            adapter_args=_safe_string_list(adapter.get("args"), default_profile.adapter_args),  # type: ignore[arg-type]
+            adapter_env_allowlist=_safe_string_list(
+                adapter.get("env_allowlist"),
+                default_profile.adapter_env_allowlist,
+            ),  # type: ignore[arg-type]
             acp_connect_timeout_sec=_safe_positive_int(
                 acp.get("connect_timeout"),  # type: ignore[arg-type]
-                DEFAULT_ACP_CONNECT_TIMEOUT_SEC,
+                default_profile.acp_connect_timeout_sec,
             ),
             acp_request_timeout_sec=_safe_positive_int(
                 acp.get("request_timeout"),  # type: ignore[arg-type]
-                DEFAULT_ACP_REQUEST_TIMEOUT_SEC,
+                default_profile.acp_request_timeout_sec,
             ),
             acp_max_retries=_safe_positive_int(
                 acp.get("max_retries"),  # type: ignore[arg-type]
-                DEFAULT_ACP_MAX_RETRIES,
+                default_profile.acp_max_retries,
             ),
             acp_backoff=_safe_backoff(
                 acp.get("backoff"),  # type: ignore[arg-type]
-                DEFAULT_ACP_BACKOFF,
+                default_profile.acp_backoff,
             ),
             acp_circuit_breaker_enabled=_safe_bool(
                 acp.get("circuit_breaker_enabled"),  # type: ignore[arg-type]
-                DEFAULT_ACP_CIRCUIT_BREAKER_ENABLED,
+                default_profile.acp_circuit_breaker_enabled,
             ),
             fallback_enabled=_safe_bool(
                 fallback.get("enabled"),  # type: ignore[arg-type]
-                False,
+                bool(default_profile.fallback_enabled),
+            ),
+            supports_mcp_config=_safe_bool(
+                capabilities.get("supports_mcp_config"),  # type: ignore[arg-type]
+                bool(default_profile.supports_mcp_config),
+            ),
+            supports_skill_config=_safe_bool(
+                capabilities.get("supports_skill_config"),  # type: ignore[arg-type]
+                bool(default_profile.supports_skill_config),
+            ),
+            tool_execution_mode=_safe_tool_execution_mode(
+                capabilities.get("tool_execution_mode"),  # type: ignore[arg-type]
+                default_profile.tool_execution_mode or DEFAULT_TOOL_EXECUTION_MODE,
+            ),
+            injection_failure_policy=_safe_injection_failure_policy(
+                capabilities.get("injection_failure_policy"),  # type: ignore[arg-type]
+                default_profile.injection_failure_policy or DEFAULT_INJECTION_FAILURE_POLICY,
             ),
         )
         parsed[provider_id] = profile
 
-    defaults = default_provider_profiles()
     if not parsed:
         return defaults
     merged = dict(defaults)
@@ -400,6 +445,9 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
 
     # Legacy compatibility path: parse old [provider] if [providers] missing.
     if not providers and provider_legacy:
+        default_legacy_profile = default_provider_profiles().get("claude") or ProviderProfile(
+            provider_id="claude"
+        )
         legacy_adapter = (
             provider_legacy.get("adapter")
             if isinstance(provider_legacy.get("adapter"), dict)
@@ -407,34 +455,40 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
         )
         legacy_acp = provider_legacy.get("acp") if isinstance(provider_legacy.get("acp"), dict) else {}
         legacy_profile = ProviderProfile(
-                provider_id="claude",
-                enabled=True,
-                backend=_normalize_provider_backend(provider_legacy.get("backend")),  # type: ignore[arg-type]
-                adapter_command=str(legacy_adapter.get("command") or DEFAULT_ADAPTER_COMMAND).strip() or DEFAULT_ADAPTER_COMMAND,  # type: ignore[arg-type]
-                adapter_args=_safe_string_list(legacy_adapter.get("args"), DEFAULT_ADAPTER_ARGS),  # type: ignore[arg-type]
-                adapter_env_allowlist=_safe_string_list(legacy_adapter.get("env_allowlist"), []),  # type: ignore[arg-type]
-                acp_connect_timeout_sec=_safe_positive_int(
-                    legacy_acp.get("connect_timeout"),  # type: ignore[arg-type]
-                    DEFAULT_ACP_CONNECT_TIMEOUT_SEC,
-                ),
-                acp_request_timeout_sec=_safe_positive_int(
-                    legacy_acp.get("request_timeout"),  # type: ignore[arg-type]
-                    DEFAULT_ACP_REQUEST_TIMEOUT_SEC,
-                ),
-                acp_max_retries=_safe_positive_int(
-                    legacy_acp.get("max_retries"),  # type: ignore[arg-type]
-                    DEFAULT_ACP_MAX_RETRIES,
-                ),
-                acp_backoff=_safe_backoff(
-                    legacy_acp.get("backoff"),  # type: ignore[arg-type]
-                    DEFAULT_ACP_BACKOFF,
-                ),
-                acp_circuit_breaker_enabled=_safe_bool(
-                    legacy_acp.get("circuit_breaker_enabled"),  # type: ignore[arg-type]
-                    DEFAULT_ACP_CIRCUIT_BREAKER_ENABLED,
-                ),
-                fallback_enabled=False,
-            )
+            provider_id="claude",
+            enabled=True,
+            backend=_normalize_provider_backend(provider_legacy.get("backend")),  # type: ignore[arg-type]
+            adapter_command=str(legacy_adapter.get("command") or DEFAULT_ADAPTER_COMMAND).strip() or DEFAULT_ADAPTER_COMMAND,  # type: ignore[arg-type]
+            adapter_args=_safe_string_list(legacy_adapter.get("args"), DEFAULT_ADAPTER_ARGS),  # type: ignore[arg-type]
+            adapter_env_allowlist=_safe_string_list(legacy_adapter.get("env_allowlist"), []),  # type: ignore[arg-type]
+            acp_connect_timeout_sec=_safe_positive_int(
+                legacy_acp.get("connect_timeout"),  # type: ignore[arg-type]
+                DEFAULT_ACP_CONNECT_TIMEOUT_SEC,
+            ),
+            acp_request_timeout_sec=_safe_positive_int(
+                legacy_acp.get("request_timeout"),  # type: ignore[arg-type]
+                DEFAULT_ACP_REQUEST_TIMEOUT_SEC,
+            ),
+            acp_max_retries=_safe_positive_int(
+                legacy_acp.get("max_retries"),  # type: ignore[arg-type]
+                DEFAULT_ACP_MAX_RETRIES,
+            ),
+            acp_backoff=_safe_backoff(
+                legacy_acp.get("backoff"),  # type: ignore[arg-type]
+                DEFAULT_ACP_BACKOFF,
+            ),
+            acp_circuit_breaker_enabled=_safe_bool(
+                legacy_acp.get("circuit_breaker_enabled"),  # type: ignore[arg-type]
+                DEFAULT_ACP_CIRCUIT_BREAKER_ENABLED,
+            ),
+            fallback_enabled=False,
+            supports_mcp_config=bool(default_legacy_profile.supports_mcp_config),
+            supports_skill_config=bool(default_legacy_profile.supports_skill_config),
+            tool_execution_mode=default_legacy_profile.tool_execution_mode
+            or DEFAULT_TOOL_EXECUTION_MODE,
+            injection_failure_policy=default_legacy_profile.injection_failure_policy
+            or DEFAULT_INJECTION_FAILURE_POLICY,
+        )
         profiles = default_provider_profiles()
         profiles["claude"] = legacy_profile
 
@@ -532,6 +586,22 @@ def _render_project_config(config: ProjectConfig) -> str:
                 "[providers.{0}.fallback]".format(provider_id),
                 "enabled = {0}".format(str(bool(profile.fallback_enabled)).lower()),
                 "",
+                "[providers.{0}.capabilities]".format(provider_id),
+                "supports_mcp_config = {0}".format(str(bool(profile.supports_mcp_config)).lower()),
+                "supports_skill_config = {0}".format(str(bool(profile.supports_skill_config)).lower()),
+                'tool_execution_mode = "{0}"'.format(
+                    _safe_tool_execution_mode(
+                        profile.tool_execution_mode,
+                        DEFAULT_TOOL_EXECUTION_MODE,
+                    )
+                ),
+                'injection_failure_policy = "{0}"'.format(
+                    _safe_injection_failure_policy(
+                        profile.injection_failure_policy,
+                        DEFAULT_INJECTION_FAILURE_POLICY,
+                    )
+                ),
+                "",
             ]
         )
 
@@ -579,24 +649,49 @@ def _default_system_prompt() -> str:
         [
             "# Perlica System Prompt",
             "",
-            "You are Perlica, a macOS control agent running in a local workspace.",
-            "Your job is to complete user tasks safely and efficiently using available tools and integrations.",
+            "## Role",
+            "You are Perlica, a macOS computer steward running in a local workspace.",
+            "Your job is to convert user intent into executable computer operations and return concrete outcomes.",
             "",
-            "Core behavior:",
-            "- Prefer concrete actions over abstract advice.",
-            "- When tools are available, decide whether to call them based on user intent.",
-            "- Use side-effectful tools carefully and explain risky actions before execution.",
+            "## Self-awareness",
+            "- You know the active CLI/provider/model in the current runtime.",
+            "- Do not repeat runtime identity by default.",
+            "- Report CLI/provider/model only when the user asks, during diagnostics, or while explaining failures.",
             "",
-            "Capabilities:",
-            "- You can run shell commands through tool calls (e.g. shell.exec).",
-            "- You can execute AppleScript when needed for macOS app automation.",
-            "- You can leverage Skill context blocks for domain-specific workflows.",
-            "- You can use MCP tools/resources/prompts exposed at runtime.",
+            "## Execution policy",
+            "- Prefer concrete execution over abstract advice.",
+            "- Choose tools adaptively by task type:",
+            "  - Prefer shell for terminal, file, and system command workflows.",
+            "  - Prefer AppleScript for GUI/app automation workflows.",
+            "  - Combine shell and AppleScript when the task requires both.",
+            "- Use Skill context and MCP tools/resources/prompts when they improve task completion.",
             "",
-            "Output contract:",
-            "- Follow the provider tool-call contract strictly.",
-            "- Keep assistant text concise and actionable.",
-            "- If blocked by permissions or missing tools, state the exact blocker and a fix.",
+            "## Permission policy",
+            "- Assume CLI tool permissions are allowed by default.",
+            "- Do not block execution due to conservative permission posture.",
+            "",
+            "## Confirmation policy (highest priority)",
+            "- Before execution, require explicit user confirmation for high-impact system operations, including:",
+            "  - install/uninstall actions",
+            "  - system settings changes",
+            "  - bulk delete or destructive file operations",
+            "  - network/security configuration changes",
+            "  - persistent background behavior changes",
+            "- Confirmation summary must include:",
+            "  - what will be executed",
+            "  - impact scope",
+            "  - rollback path (if available)",
+            "",
+            "## Failure reporting",
+            "- When execution fails, report in a structured way:",
+            "  - failure reason",
+            "  - execution evidence (command, exit code, stderr summary)",
+            "  - next remediation step",
+            "",
+            "## Output contract",
+            "- Treat provider tool execution as provider-managed; do not require local tool loop.",
+            "- Keep assistant text concise, actionable, and auditable.",
+            "- Never output hidden thought or reasoning traces.",
             "",
         ]
     )
@@ -776,6 +871,7 @@ def load_settings(
         context_id=resolved_context,
         provider=resolved_provider,
         provider_profile=resolved_profile,
+        provider_profiles=dict(project_config.provider_profiles),
         provider_backend=resolved_profile.backend,
         provider_adapter_command=_resolve_adapter_command(
             resolved_profile.adapter_command,
