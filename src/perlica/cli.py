@@ -14,7 +14,9 @@ from perlica.config import (
     ALLOWED_PROVIDERS,
     ProjectConfigError,
     initialize_project_config,
+    load_project_config,
     load_settings,
+    mark_provider_selected,
     project_config_exists,
     resolve_project_config_root,
 )
@@ -145,13 +147,102 @@ def _validate_provider(provider: Optional[str]) -> Optional[str]:
         typer.echo(
             render_notice(
                 "error",
-                "不支持的 provider：{0}，当前仅支持：claude。".format(provider),
-                "Unsupported provider: {0}. Supported: claude.".format(provider),
+                "不支持的 provider：{0}，当前支持：{1}。".format(
+                    provider,
+                    "|".join(ALLOWED_PROVIDERS),
+                ),
+                "Unsupported provider: {0}. Supported: {1}.".format(
+                    provider,
+                    "|".join(ALLOWED_PROVIDERS),
+                ),
             ),
             err=True,
         )
         return None
     return normalized
+
+
+def _prompt_first_provider_selection() -> str:
+    choices = list(ALLOWED_PROVIDERS)
+    typer.echo(
+        render_notice(
+            "info",
+            "首次启动请选择 provider（只会询问一次）：",
+            "First launch: choose provider (one-time).",
+        )
+    )
+    for index, provider_id in enumerate(choices, start=1):
+        typer.echo("{0}) {1}".format(index, provider_id))
+
+    while True:
+        answer = typer.prompt(
+            "请输入编号或 provider id (Enter index or provider id)",
+            default="1",
+        ).strip().lower()
+        if answer in ALLOWED_PROVIDERS:
+            return answer
+        if answer.isdigit():
+            number = int(answer)
+            if 1 <= number <= len(choices):
+                return choices[number - 1]
+        typer.echo(
+            render_notice(
+                "warn",
+                "无效选择，请输入编号或 {0}。".format("|".join(ALLOWED_PROVIDERS)),
+                "Invalid selection. Use index or {0}.".format("|".join(ALLOWED_PROVIDERS)),
+            ),
+            err=True,
+        )
+
+
+def _resolve_provider_with_first_selection(provider: Optional[str]) -> tuple[Optional[str], int]:
+    validated_provider = _validate_provider(provider)
+    if provider is not None and validated_provider is None:
+        return None, 2
+
+    try:
+        project_config = load_project_config()
+    except ProjectConfigError as exc:
+        typer.echo(render_notice("error", str(exc)), err=True)
+        return None, 2
+
+    if project_config.provider_selected:
+        return validated_provider, 0
+
+    if validated_provider:
+        selected = mark_provider_selected(validated_provider)
+        typer.echo(
+            render_notice(
+                "success",
+                "首次启动已选择 provider：{0}".format(selected),
+                "Selected provider for first launch: {0}".format(selected),
+            )
+        )
+        return selected, 0
+
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        typer.echo(
+            render_notice(
+                "error",
+                "首次非交互运行必须显式指定 `--provider {0}`。".format("|".join(ALLOWED_PROVIDERS)),
+                "First non-interactive run requires `--provider {0}`.".format(
+                    "|".join(ALLOWED_PROVIDERS)
+                ),
+            ),
+            err=True,
+        )
+        return None, 2
+
+    selected = _prompt_first_provider_selection()
+    selected = mark_provider_selected(selected)
+    typer.echo(
+        render_notice(
+            "success",
+            "已保存默认 provider：{0}".format(selected),
+            "Default provider saved: {0}".format(selected),
+        )
+    )
+    return selected, 0
 
 
 def _execute_prompt(
@@ -161,9 +252,9 @@ def _execute_prompt(
     context_id: Optional[str],
     session_ref: Optional[str],
 ) -> int:
-    validated_provider = _validate_provider(provider)
-    if provider is not None and validated_provider is None:
-        return 2
+    validated_provider, code = _resolve_provider_with_first_selection(provider)
+    if code != 0:
+        return code
 
     settings = load_settings(context_id=context_id, provider=validated_provider)
     resolved_provider = settings.provider
@@ -288,9 +379,9 @@ def _execute_chat(
     yes: bool,
     context_id: Optional[str],
 ) -> int:
-    validated_provider = _validate_provider(provider)
-    if provider is not None and validated_provider is None:
-        return 2
+    validated_provider, code = _resolve_provider_with_first_selection(provider)
+    if code != 0:
+        return code
     settings = load_settings(context_id=context_id, provider=validated_provider)
     return start_repl(
         provider=settings.provider,
@@ -305,9 +396,9 @@ def _execute_service(
     yes: bool,
     context_id: Optional[str],
 ) -> int:
-    validated_provider = _validate_provider(provider)
-    if provider is not None and validated_provider is None:
-        return 2
+    validated_provider, code = _resolve_provider_with_first_selection(provider)
+    if code != 0:
+        return code
     settings = load_settings(context_id=context_id, provider=validated_provider)
     return start_service_mode(
         provider=settings.provider,
@@ -319,7 +410,11 @@ def _execute_service(
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="模型提供方（默认 claude） (Provider ID, default claude)"),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="模型提供方（默认取配置） (Provider ID, default from config)",
+    ),
     yes: bool = typer.Option(False, "--yes", help="仅本次跳过审批确认 (Skip approval once)"),
     context_id: Optional[str] = typer.Option(None, "--context", help="上下文 ID (Perlica context ID)"),
     service: bool = typer.Option(False, "--service", help="前台服务模式（手机桥接） (Foreground bridge mode)"),
@@ -376,7 +471,11 @@ def init_cmd(
 def run_cmd(
     ctx: typer.Context,
     text_parts: List[str] = typer.Argument(..., help="自然语言指令 (Natural language instruction)"),
-    provider: Optional[str] = typer.Option(None, "--provider", help="模型提供方（默认 claude） (Provider ID, default claude)"),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="模型提供方（默认取配置） (Provider ID, default from config)",
+    ),
     yes: bool = typer.Option(False, "--yes", help="仅本次跳过审批确认 (Skip approval once)"),
     context_id: Optional[str] = typer.Option(None, "--context", help="上下文 ID (Perlica context ID)"),
     session_ref: Optional[str] = typer.Option(None, "--session", help="会话 ID/名称/前缀 (Session ref)"),
@@ -405,7 +504,11 @@ def run_cmd(
 @app.command("chat")
 def chat_cmd(
     ctx: typer.Context,
-    provider: Optional[str] = typer.Option(None, "--provider", help="模型提供方（默认 claude） (Provider ID, default claude)"),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="模型提供方（默认取配置） (Provider ID, default from config)",
+    ),
     yes: bool = typer.Option(False, "--yes", help="仅本次跳过审批确认 (Skip approval once)"),
     context_id: Optional[str] = typer.Option(None, "--context", help="上下文 ID (Perlica context ID)"),
 ) -> None:
@@ -562,7 +665,7 @@ def session_list_cmd(
 def session_new_cmd(
     name: Optional[str] = typer.Option(None, "--name", help="会话别名（可选） (Optional session alias)"),
     provider: Optional[str] = typer.Option(
-        None, "--provider", help="初始锁定的 provider（默认 claude） (Initial provider lock, default claude)"
+        None, "--provider", help="初始锁定的 provider（默认取配置） (Initial provider lock, default from config)"
     ),
     context_id: Optional[str] = typer.Option(None, "--context", help="上下文 ID (Perlica context ID)"),
 ) -> None:

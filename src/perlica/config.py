@@ -42,6 +42,7 @@ DEFAULT_ACP_CIRCUIT_BREAKER_ENABLED = True
 DEFAULT_MAX_TOOL_CALLS = 8
 DEFAULT_PROVIDER_CONTEXT_WINDOWS = {
     "claude": 200000,
+    "opencode": 200000,
 }
 DEFAULT_CONTEXT_BUDGET_RATIO = 0.8
 DEFAULT_MAX_SUMMARY_ATTEMPTS = 3
@@ -61,6 +62,7 @@ class ProjectConfigError(RuntimeError):
 @dataclass
 class ProjectConfig:
     default_provider: str = DEFAULT_PROVIDER_ID
+    provider_selected: bool = True
     provider_profiles: Dict[str, ProviderProfile] = field(default_factory=default_provider_profiles)
     provider_backend: str = DEFAULT_PROVIDER_BACKEND
     provider_adapter_command: str = DEFAULT_ADAPTER_COMMAND
@@ -339,9 +341,12 @@ def _safe_provider_profiles(data: Dict[str, object]) -> Dict[str, ProviderProfil
         )
         parsed[provider_id] = profile
 
+    defaults = default_provider_profiles()
     if not parsed:
-        parsed = default_provider_profiles()
-    return parsed
+        return defaults
+    merged = dict(defaults)
+    merged.update(parsed)
+    return merged
 
 
 def _resolve_active_profile(
@@ -374,12 +379,23 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
     )
 
     windows = dict(DEFAULT_PROVIDER_CONTEXT_WINDOWS)
-    windows["claude"] = _safe_positive_int(
-        provider_windows.get("claude"),  # type: ignore[arg-type]
-        windows["claude"],
-    )
+    for provider_id, default_window in list(windows.items()):
+        windows[provider_id] = _safe_positive_int(
+            provider_windows.get(provider_id),  # type: ignore[arg-type]
+            default_window,
+        )
+    for key, value in provider_windows.items():  # type: ignore[assignment]
+        provider_id = str(key or "").strip().lower()
+        if not provider_id:
+            continue
+        windows[provider_id] = _safe_positive_int(value, windows.get(provider_id, 200000))
 
     default_provider = _normalize_provider(model.get("default_provider"))  # type: ignore[arg-type]
+    if "provider_selected" in model:
+        provider_selected = _safe_bool(model.get("provider_selected"), True)  # type: ignore[arg-type]
+    else:
+        # Legacy config compatibility: older files implicitly had provider selected.
+        provider_selected = True
     profiles = _safe_provider_profiles(providers)
 
     # Legacy compatibility path: parse old [provider] if [providers] missing.
@@ -390,8 +406,7 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
             else {}
         )
         legacy_acp = provider_legacy.get("acp") if isinstance(provider_legacy.get("acp"), dict) else {}
-        profiles = {
-            "claude": ProviderProfile(
+        legacy_profile = ProviderProfile(
                 provider_id="claude",
                 enabled=True,
                 backend=_normalize_provider_backend(provider_legacy.get("backend")),  # type: ignore[arg-type]
@@ -420,11 +435,13 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
                 ),
                 fallback_enabled=False,
             )
-        }
+        profiles = default_provider_profiles()
+        profiles["claude"] = legacy_profile
 
     active_profile = _resolve_active_profile(default_provider, profiles)
     return ProjectConfig(
         default_provider=default_provider,
+        provider_selected=provider_selected,
         provider_profiles=profiles,
         provider_backend=active_profile.backend,
         provider_adapter_command=active_profile.adapter_command,
@@ -468,91 +485,77 @@ def _render_project_config(config: ProjectConfig) -> str:
             escaped.append('"{0}"'.format(text))
         return "[{0}]".format(", ".join(escaped))
 
-    return "\n".join(
+    profiles = default_provider_profiles()
+    profiles.update(config.provider_profiles)
+
+    lines: List[str] = [
+        "[model]",
+        'default_provider = "{0}"'.format(config.default_provider),
+        "provider_selected = {0}".format(str(bool(config.provider_selected)).lower()),
+        "",
+    ]
+
+    for provider_id in PROFILE_ALLOWED_PROVIDER_IDS:
+        profile = profiles[provider_id]
+        lines.extend(
+            [
+                "[providers.{0}]".format(provider_id),
+                "enabled = {0}".format(str(bool(profile.enabled)).lower()),
+                'backend = "{0}"'.format(_normalize_provider_backend(profile.backend)),
+                "",
+                "[providers.{0}.adapter]".format(provider_id),
+                'command = "{0}"'.format(
+                    str(profile.adapter_command).replace("\\", "\\\\").replace('"', '\\"')
+                ),
+                "args = {0}".format(_toml_array(profile.adapter_args)),
+                "env_allowlist = {0}".format(_toml_array(profile.adapter_env_allowlist)),
+                "",
+                "[providers.{0}.acp]".format(provider_id),
+                "connect_timeout = {0}".format(
+                    _safe_positive_int(profile.acp_connect_timeout_sec, DEFAULT_ACP_CONNECT_TIMEOUT_SEC)
+                ),
+                "request_timeout = {0}".format(
+                    _safe_positive_int(profile.acp_request_timeout_sec, DEFAULT_ACP_REQUEST_TIMEOUT_SEC)
+                ),
+                "max_retries = {0}".format(
+                    _safe_positive_int(profile.acp_max_retries, DEFAULT_ACP_MAX_RETRIES)
+                ),
+                'backoff = "{0}"'.format(
+                    _safe_backoff(profile.acp_backoff, DEFAULT_ACP_BACKOFF)
+                    .replace("\\", "\\\\")
+                    .replace('"', '\\"')
+                ),
+                "circuit_breaker_enabled = {0}".format(
+                    str(bool(profile.acp_circuit_breaker_enabled)).lower()
+                ),
+                "",
+                "[providers.{0}.fallback]".format(provider_id),
+                "enabled = {0}".format(str(bool(profile.fallback_enabled)).lower()),
+                "",
+            ]
+        )
+
+    lines.extend(
         [
-            "[model]",
-            'default_provider = "{0}"'.format(config.default_provider),
-            "",
-            "[providers.claude]",
-            "enabled = true",
-            'backend = "{0}"'.format(
-                _normalize_provider_backend(
-                    config.provider_profiles.get("claude", default_provider_profiles()["claude"]).backend
-                )
-            ),
-            "",
-            "[providers.claude.adapter]",
-            'command = "{0}"'.format(
-                str(config.provider_profiles.get("claude", default_provider_profiles()["claude"]).adapter_command)
-                .replace("\\", "\\\\")
-                .replace('"', '\\"')
-            ),
-            "args = {0}".format(
-                _toml_array(config.provider_profiles.get("claude", default_provider_profiles()["claude"]).adapter_args)
-            ),
-            "env_allowlist = {0}".format(
-                _toml_array(
-                    config.provider_profiles.get(
-                        "claude",
-                        default_provider_profiles()["claude"],
-                    ).adapter_env_allowlist
-                )
-            ),
-            "",
-            "[providers.claude.acp]",
-            "connect_timeout = {0}".format(
-                _safe_positive_int(
-                    config.provider_profiles.get("claude", default_provider_profiles()["claude"]).acp_connect_timeout_sec,
-                    DEFAULT_ACP_CONNECT_TIMEOUT_SEC,
-                )
-            ),
-            "request_timeout = {0}".format(
-                _safe_positive_int(
-                    config.provider_profiles.get("claude", default_provider_profiles()["claude"]).acp_request_timeout_sec,
-                    DEFAULT_ACP_REQUEST_TIMEOUT_SEC,
-                )
-            ),
-            "max_retries = {0}".format(
-                _safe_positive_int(
-                    config.provider_profiles.get("claude", default_provider_profiles()["claude"]).acp_max_retries,
-                    DEFAULT_ACP_MAX_RETRIES,
-                )
-            ),
-            'backoff = "{0}"'.format(
-                _safe_backoff(
-                    config.provider_profiles.get("claude", default_provider_profiles()["claude"]).acp_backoff,
-                    DEFAULT_ACP_BACKOFF,
-                )
-                .replace("\\", "\\\\")
-                .replace('"', '\\"')
-            ),
-            "circuit_breaker_enabled = {0}".format(
-                str(
-                    bool(
-                        config.provider_profiles.get(
-                            "claude",
-                            default_provider_profiles()["claude"],
-                        ).acp_circuit_breaker_enabled
-                    )
-                ).lower()
-            ),
-            "",
-            "[providers.claude.fallback]",
-            "enabled = {0}".format(
-                str(
-                    bool(
-                        config.provider_profiles.get("claude", default_provider_profiles()["claude"]).fallback_enabled
-                    )
-                ).lower()
-            ),
-            "",
             "[runtime]",
             "max_tool_calls = {0}".format(config.max_tool_calls),
             "context_budget_ratio = {0}".format(config.context_budget_ratio),
             "max_summary_attempts = {0}".format(config.max_summary_attempts),
             "",
             "[runtime.provider_context_windows]",
-            "claude = {0}".format(config.provider_context_windows.get("claude", 200000)),
+        ]
+    )
+    windows = dict(DEFAULT_PROVIDER_CONTEXT_WINDOWS)
+    windows.update(config.provider_context_windows)
+    for provider_id in sorted(windows.keys()):
+        lines.append(
+            "{0} = {1}".format(
+                provider_id,
+                _safe_positive_int(windows.get(provider_id), 200000),
+            )
+        )
+    lines.extend(
+        [
             "",
             "[runtime.logs]",
             "enabled = {0}".format(str(bool(config.logs_enabled)).lower()),
@@ -568,6 +571,7 @@ def _render_project_config(config: ProjectConfig) -> str:
             "",
         ]
     )
+    return "\n".join(lines)
 
 
 def _default_system_prompt() -> str:
@@ -640,7 +644,7 @@ def initialize_project_config(workspace_dir: Optional[Path] = None, force: bool 
     (config_root / PROMPTS_DIR_NAME).mkdir(parents=True, exist_ok=True)
     (config_root / MCP_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
-    default_config = ProjectConfig()
+    default_config = ProjectConfig(provider_selected=False)
     default_profile = default_config.provider_profiles.get("claude")
     if default_profile is not None and default_profile.adapter_command in {"python", "python3"}:
         default_config.provider_profiles["claude"] = replace(
@@ -717,8 +721,33 @@ def set_default_provider(provider_id: str, workspace_dir: Optional[Path] = None)
 
     config = load_project_config(workspace_dir=workspace_dir)
     config.default_provider = normalized
+    config.provider_selected = True
     save_project_config(config, workspace_dir=workspace_dir)
     return normalized
+
+
+def provider_selection_required(workspace_dir: Optional[Path] = None) -> bool:
+    config = load_project_config(workspace_dir=workspace_dir)
+    return not bool(config.provider_selected)
+
+
+def mark_provider_selected(
+    provider_id: Optional[str] = None,
+    workspace_dir: Optional[Path] = None,
+) -> str:
+    config = load_project_config(workspace_dir=workspace_dir)
+    selected = _normalize_provider(provider_id or config.default_provider)
+    if selected not in ALLOWED_PROVIDERS:
+        raise ProjectConfigError(
+            "不支持的 provider：'{0}'，可选值：{1} (unsupported provider)".format(
+                provider_id,
+                "|".join(ALLOWED_PROVIDERS),
+            )
+        )
+    config.default_provider = selected
+    config.provider_selected = True
+    save_project_config(config, workspace_dir=workspace_dir)
+    return selected
 
 
 def load_settings(

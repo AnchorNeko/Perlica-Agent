@@ -135,7 +135,7 @@ def test_runner_requires_explicit_provider_for_unlocked_session(isolated_env, tm
         runner = Runner(runtime=runtime, provider_id=None, max_tool_calls=2)
         with pytest.raises(ProviderError) as exc_info:
             runner.run_text("hello", session_ref=session.session_id, assume_yes=True)
-        assert "please specify --provider claude" in str(exc_info.value)
+        assert "please specify --provider claude|opencode" in str(exc_info.value)
         unlocked = runtime.session_store.get_session(session.session_id)
         assert unlocked is not None
         assert unlocked.provider_locked is None
@@ -167,5 +167,21 @@ def test_runner_keeps_locked_provider_after_default_change(isolated_env, tmp_pat
         locked = runtime.session_store.get_session(session.session_id)
         assert locked is not None
         assert locked.provider_locked == "codex"
+    finally:
+        runtime.close()
+
+
+def test_runner_fails_when_locked_provider_is_not_registered(isolated_env, tmp_path: Path):
+    runtime = _runtime(tmp_path, provider="fake")
+    try:
+        session = runtime.session_store.create_session(
+            context_id=runtime.context_id,
+            name="locked-missing",
+            provider_locked="missing-provider",
+        )
+        runner = Runner(runtime=runtime, provider_id=None, max_tool_calls=2)
+        with pytest.raises(ProviderError) as exc_info:
+            runner.run_text("hello", session_ref=session.session_id, assume_yes=True)
+        assert "provider 'missing-provider' unavailable" in str(exc_info.value)
     finally:
         runtime.close()

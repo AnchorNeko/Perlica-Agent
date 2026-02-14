@@ -21,19 +21,26 @@ claude --version
 claude -p "你好" --output-format json --max-turns 1
 ```
 
-3. 在项目目录初始化配置（Initialize project config）
+3. 确认 OpenCode ACP 可用（Check OpenCode ACP is available）
+
+```bash
+opencode --version
+opencode acp --help
+```
+
+4. 在项目目录初始化配置（Initialize project config）
 
 ```bash
 perlica init
 ```
 
-4. 启动交互会话（Start interactive chat）
+5. 启动交互会话（Start interactive chat）
 
 ```bash
 perlica
 ```
 
-5. 启动前台手机桥接服务（Start foreground mobile bridge）
+6. 启动前台手机桥接服务（Start foreground mobile bridge）
 
 ```bash
 perlica --service
@@ -41,20 +48,25 @@ perlica --service
 
 ## 入口与运行模式（Entrypoints & Modes）
 
-- `perlica [--provider claude]`：进入交互聊天模式（默认 `claude`）。  
+- `perlica [--provider claude|opencode]`：进入交互聊天模式。  
   Default interactive chat mode.
-- `perlica chat [--provider claude]`：显式进入交互聊天模式。  
+- `perlica chat [--provider claude|opencode]`：显式进入交互聊天模式。  
   Explicit interactive chat mode.
-- `perlica run "..." [--provider claude]`：单轮执行后退出。  
+- `perlica run "..." [--provider claude|opencode]`：单轮执行后退出。  
   Run one turn and exit.
-- `perlica --service [--provider claude]`：进入服务模式（手机桥接 TUI）。  
+- `perlica --service [--provider claude|opencode]`：进入服务模式（手机桥接 TUI）。  
   Service bridge TUI mode.
 - `perlica --help`：仅显示帮助，不进入聊天。  
   Show help only.
 - 非 TTY 且无子命令时：读取 stdin 执行单轮后退出。  
   In non-TTY without subcommand, reads stdin for one-shot execution.
-- 当前版本仅支持 `claude`，`--provider` 可省略。若传入非 `claude` 会报错。  
-  Current version supports `claude` only; non-claude provider is rejected.
+
+首次 provider 选择（First Provider Selection）：
+
+1. 首次在 TTY 启动时会提示选择默认 provider（`claude` 或 `opencode`），并写入配置。  
+   First TTY startup asks you to choose default provider and persists it.
+2. 首次在非 TTY 启动时，如果未显式传 `--provider`，会直接报错并退出。  
+   On first non-TTY startup, `--provider` is required.
 
 ## 交互模式（Interactive Chat）
 
@@ -129,6 +141,17 @@ Perlica supports ACP interaction confirmation so the model can request user deci
 5. 回答提交后会继续等待同一轮模型最终响应，不会启动第二次 provider 主调用。  
    After reply submission, Perlica continues waiting for final output in the same provider call.
 
+### 串行任务模型（Single Active Task）
+
+1. 每条用户输入都是一个任务（task），同一时刻只允许一个活动任务。  
+   Each user input is one task; only one active task is allowed at a time.
+2. provider 在任务内发起的多轮确认属于同一任务，回答不算新指令。  
+   Multi-round provider confirmations stay in the same task, not new commands.
+3. 上一任务未完成时：聊天模式会拒绝新普通输入；service 模式会将新消息排队。  
+   While a task is active: chat rejects new normal input, service defers new messages.
+4. 可观测事件：`task.started`、`task.state.changed`、`task.command.deferred`、`task.command.rejected`。  
+   Check these events in debug logs for task-level diagnosis.
+
 Claude Code 兼容说明（Claude AskUserQuestion compatibility）：
 
 1. 当 `claude -p` 返回 `permission_denials.tool_name=AskUserQuestion` 时，Perlica 会把问题映射为 pending 交互并展示选项。  
@@ -137,6 +160,12 @@ Claude Code 兼容说明（Claude AskUserQuestion compatibility）：
    You can answer with an index or free text; Perlica appends answers to follow-up context and continues.
 3. 支持同一轮里连续多个问题，直到模型返回最终结果或达到安全上限。  
    Multiple questions in a single run are supported until final result or safety cap.
+
+service 远端交互示例（iMessage）：
+
+1. 手机收到待确认问题与选项（如 1/2/3）。  
+2. 直接回复 `1`、`/choose 1` 或自定义文本。  
+3. Perlica 先回复 `已收到🫡`，再回复“交互回答已提交，继续执行中”，随后继续任务并返回最终结果。  
 
 ## 单轮执行（One-Shot Mode）
 
@@ -200,15 +229,13 @@ enabled = true
 
 ## ACP Provider 主路径（ACP-First Provider Path）
 
-Perlica 当前默认 provider 是 `claude`，并通过内置 ACP adapter
-（桥接官方 `claude` CLI）走 ACP 主通路。  
-Perlica uses `claude` by default and talks through ACP via the built-in
-adapter, which bridges the official `claude` CLI.
+Perlica 当前支持 `claude` 与 `opencode` 两个 provider，二者都走 ACP 主通路。  
+Perlica supports both `claude` and `opencode`, both via ACP-first path.
 
-默认 adapter（Default adapter）：
+默认 adapter（Default adapters）：
 
-- `command = "python3"`
-- `args = ["-m", "perlica.providers.acp_adapter_server"]`
+- `claude`: `command = "python3"`, `args = ["-m", "perlica.providers.acp_adapter_server"]`
+- `opencode`: `command = "opencode"`, `args = ["acp"]`
 
 你可以在 `.perlica_config/config.toml` 覆盖 adapter 与 ACP 参数：
 You can override adapter and ACP parameters in `.perlica_config/config.toml`:
@@ -216,6 +243,7 @@ You can override adapter and ACP parameters in `.perlica_config/config.toml`:
 ```toml
 [model]
 default_provider = "claude"
+provider_selected = false # init defaults to false, becomes true after first selection
 
 [providers.claude]
 enabled = true
@@ -234,6 +262,25 @@ backoff = "exponential+jitter"
 circuit_breaker_enabled = true
 
 [providers.claude.fallback]
+enabled = false
+
+[providers.opencode]
+enabled = true
+backend = "acp" # acp only
+
+[providers.opencode.adapter]
+command = "opencode"
+args = ["acp"]
+env_allowlist = []
+
+[providers.opencode.acp]
+connect_timeout = 10
+request_timeout = 60
+max_retries = 2 # deprecated/no-op in single-call mode
+backoff = "exponential+jitter"
+circuit_breaker_enabled = true
+
+[providers.opencode.fallback]
 enabled = false
 ```
 
@@ -261,23 +308,23 @@ PERLICA_PROVIDER_BREAK_GLASS=1 perlica run "..."
 触发回退会写审计事件：`provider.fallback_activated`。  
 Fallback activation emits audit event `provider.fallback_activated`.
 
-### Claude ACP 实战经验（Timeout/卡住排查）
+### ACP 实战经验（Timeout/卡住排查）
 
 以下是当前 As-Built 里已落地的关键稳定性经验：  
 The following stability lessons are already applied in current As-Built.
 
 1. 内置 ACP adapter 调 Claude CLI 时，必须显式 `stdin=DEVNULL`。  
    If Claude inherits ACP stdin pipe, `session/prompt` may block and eventually timeout.
-2. 内置 ACP adapter 的 `session/prompt` 采用同步执行并直接回包。  
-   Prompt execution is synchronous to avoid heartbeat/notification interfering with RPC response delivery.
-3. 若你改用外部 `cc-acp`，请先确认 CLI 登录态与运行权限；否则可能出现快速返回错误文本（例如 `Claude Code process exited with code 1`）。
+2. OpenCode ACP 返回 `sessionId` + `prompt` 语义，Perlica ACPClient 已兼容该官方参数形态。  
+   OpenCode ACP (`sessionId` + `prompt`) is supported by ACPClient.
+3. 若你改用外部 ACP server，请先确认认证状态与运行权限；否则可能快速失败。  
 4. 若看到 pending 长时间不结束，先查事件链是否有 `interaction.requested` 但无 `interaction.answered/acp.reply.sent`。  
    If pending is stuck, check whether `interaction.requested` exists without `interaction.answered/acp.reply.sent`.
 
 快速自检（Quick health check）：
 
 ```bash
-PYTHONPATH=src /Users/anchorcat/miniconda3/bin/python -m perlica.cli run "你好" --yes
+PYTHONPATH=src /Users/anchorcat/miniconda3/bin/python -m perlica.cli run "你好" --provider claude --yes
 ```
 
 通过标准（Pass criteria）：
@@ -312,13 +359,13 @@ Service mode requires explicit channel activation:
 ```text
 /service status
 /service channel list
-/service channel use imessage
+/service channel use <channel_id>
 ```
 
 ### 首次配对（First Pairing）
 
 1. 启动 `perlica --service`。
-2. 执行 `/service channel use imessage`。
+2. 执行 `/service channel use <channel_id>`（例如 `imessage`）。
 3. 查看界面给出的 6 位配对码。
 4. 在手机 iMessage 发送 `/pair <code>`。
 5. 成功后绑定联系人和会话。
@@ -386,14 +433,16 @@ perlica session new --name demo
 
 - 已移除 `/model` 与 `perlica model get|set`。  
   `/model` and `perlica model get|set` are removed.
-- 当前版本新会话默认锁定 `claude`（无需显式 `--provider`）。  
-  New sessions are locked to `claude` by default.
+- 新会话会锁定到当前活动 provider（`claude` 或 `opencode`）。  
+  New sessions are locked to current active provider (`claude` or `opencode`).
 - 新建会话立即写入 `provider_locked`，运行时不再隐式回退“默认 provider”。  
   New sessions are immediately `provider_locked`; runtime no longer falls back to a default provider.
+- 若会话锁定的 provider 未注册/不可用，运行会直接失败并返回结构化错误，不会回退到其他 provider。  
+  If a session-locked provider is unavailable, runtime fails fast with structured error and does not fallback.
 - 启动迁移会删除历史 `provider_locked=codex` 会话数据。  
   Startup migration removes legacy `provider_locked=codex` sessions.
-- service 启动时若绑定会话不是 `claude`，会自动迁移到新的 `claude` 会话并保持联系人绑定。  
-  Service mode auto-migrates non-claude bound sessions to claude.
+- service 启动时若绑定会话 provider 与当前不一致，会自动切换到新会话并保持联系人绑定。  
+  Service mode auto-migrates bound session when provider mismatch is detected.
 - provider 返回 `assistant_text=""` 且 `tool_calls=[]`（`finish_reason=stop`）会被判定为无效响应并报错，不再写入空助手消息。  
   Provider responses with empty `assistant_text` and no tool calls are treated as invalid and fail fast.
 - Perlica 运行链路是“一问一调”：每次输入只发起一次 provider 调用（`llm_call_index=1`），不进入本地多轮 tool loop。  
@@ -410,6 +459,8 @@ perlica session new --name demo
   Built-in adapter failures are surfaced in doctor via `acp_adapter_status`.
 - 若你改用外部 `cc-acp`，其不可执行时会直接失败并给出安装提示，不会自动回退。  
   If you switch to external `cc-acp`, missing executable fails fast without auto-fallback.
+- `session/prompt` 只允许“用户可见文本字段”回退；若仅有 thought/推理片段且无可见回复文本，会按无效响应失败上报。  
+  `session/prompt` fallback is restricted to user-visible fields; thought-only payloads fail as invalid response.
 
 ## 诊断与排查（Doctor & Troubleshooting）
 
@@ -421,7 +472,7 @@ perlica doctor --verbose --format text
 
 `doctor` 关注点（Doctor highlights）：
 
-- provider 可用性（claude）
+- provider 可用性（claude/opencode）
 - `plugins_loaded / plugins_failed`
 - `skills_loaded / skills_errors`
 - `permissions`（shell + applescript）
@@ -501,5 +552,6 @@ python3 -m pip install textual
 
 ```bash
 perlica run "..." --provider claude
+perlica run "..." --provider opencode
 perlica run "..."
 ```

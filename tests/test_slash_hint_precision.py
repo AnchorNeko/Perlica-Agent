@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from perlica.config import load_settings
 from perlica.kernel.runtime import Runtime
 from perlica.repl_commands import InteractionCommandHooks, ReplState, build_slash_hint
@@ -29,6 +31,7 @@ def test_removed_model_hint_and_session_provider_values(isolated_env):
 
     hint = build_slash_hint("/session new --provider ", state=_state())
     assert "claude" in hint.text
+    assert "opencode" in hint.text
 
 
 def test_session_prefix_and_new_option_hints(isolated_env):
@@ -109,6 +112,20 @@ def test_service_hint_precision(isolated_env):
     assert "low" in hint.text
     assert "medium" in hint.text
     assert "high" in hint.text
+
+
+def test_service_channel_hint_uses_channel_registry_values(isolated_env, monkeypatch):
+    monkeypatch.setattr(
+        "perlica.service.channels.list_channel_registrations",
+        lambda: [
+            SimpleNamespace(channel_id="qq"),
+            SimpleNamespace(channel_id="sms"),
+        ],
+    )
+
+    hint = build_slash_hint("/service channel use ", state=_state())
+    assert "qq" in hint.text
+    assert "sms" in hint.text
 
 
 def test_mcp_hint_precision(isolated_env):

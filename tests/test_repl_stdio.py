@@ -88,25 +88,19 @@ def test_repl_auto_init_when_config_missing(tmp_path: Path, monkeypatch):
     assert (tmp_path / ".perlica_config" / "config.toml").is_file()
 
 
-def test_non_tty_repl_uses_default_provider_when_missing(isolated_env, monkeypatch):
+def test_non_tty_repl_requires_provider_on_first_selection(isolated_env, monkeypatch):
     monkeypatch.setattr(sys, "stdin", FakeStdin("hello", tty=False))
-    calls = []
     out = StringIO()
     err = StringIO()
-
-    def fake_run(text, provider, yes, context_id, session_ref):
-        calls.append((text, provider, yes, context_id, session_ref))
-        return 0
 
     exit_code = start_repl(
         provider=None,
         yes=True,
         context_id=None,
-        run_executor=fake_run,
+        run_executor=lambda *_args, **_kwargs: 0,
         stream=out,
         err_stream=err,
     )
 
-    assert exit_code == 0
-    assert calls
-    assert calls[0][1] == "claude"
+    assert exit_code == 2
+    assert "首次非交互运行必须显式指定" in err.getvalue()

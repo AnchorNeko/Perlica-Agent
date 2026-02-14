@@ -21,6 +21,7 @@ provider 合同和错误语义变更属于文档先行（常规强制）。
 3. `ProviderTransportError` / `ProviderProtocolError` / `ProviderContractError` 判定。  
 4. 受控降级结构（`ProviderDegradedResponse`）与事件对齐。
 5. ACP `session/prompt` 长推理等待策略（不做本地硬超时）。
+6. 为 `opencode` 等 ACP 方言补充“已知结构的保守兼容提取”（仅限最终可见回复文本字段）。
 
 ## 禁止改动
 
@@ -31,6 +32,7 @@ provider 合同和错误语义变更属于文档先行（常规强制）。
 5. 不经 break-glass 开关引入 legacy CLI 直连常态路径。  
 6. 在 contract 失败时静默吞错（必须事件可观测）。
 7. 将 `session/prompt` 改回本地硬超时，导致思考中调用被误判 timeout。
+8. 把 `agent_thought_chunk` / chain-of-thought 当作最终用户回复输出。
 
 ## 改动前检查
 
@@ -40,6 +42,7 @@ provider 合同和错误语义变更属于文档先行（常规强制）。
 4. ACP 生命周期是否完整（`initialize/session/new/session/prompt/session/close`）。  
 5. `request_id/run_id/trace_id` 是否具备幂等与追踪语义。
 6. `session/prompt` 是否保持“等待最终结果”，超时是否仅用于非 prompt 方法。
+7. 若涉及 `opencode` 兼容，是否先定义“主路径 + 回退路径”的字段白名单。
 
 ## 改动后必跑
 
@@ -56,6 +59,7 @@ provider 合同和错误语义变更属于文档先行（常规强制）。
 4. 混淆 ACP 协议错误与业务合同错误，导致告警分类失真。  
 5. 降级回复返回了用户文本但遗漏 `llm.contract_degraded` 事件。
 6. 看到 progress notification 持续增长却仍触发本地 prompt timeout。
+7. `opencode` 返回了文本，但解析器只识别单一 `sessionUpdate` 类型，导致误报空回复。
 
 ## 完成定义（DoD）
 
@@ -63,3 +67,4 @@ provider 合同和错误语义变更属于文档先行（常规强制）。
 2. 错误语义清晰可诊断。  
 3. 文档已更新。
 4. ACP-first 主路径稳定，break-glass 路径仅应急可审计。
+5. `opencode` 在“有输出但主解析失败”场景下能回退给用户可见文本，并保留诊断事件。

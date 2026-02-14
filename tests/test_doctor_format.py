@@ -28,6 +28,7 @@ def test_doctor_text_format(isolated_env):
     assert result.exit_code == 0
     assert "系统诊断 (Doctor Report)" in result.stdout
     assert "Provider 可用性 (Provider Availability)" in result.stdout
+    assert "opencode=" in result.stdout
     assert "权限检查 (Permission Checks)" in result.stdout
     assert "MCP" in result.stdout
 

@@ -58,6 +58,12 @@ flowchart TB
   Orchestrator --> Channel
 ```
 
+Provider 事实（As-Built）：
+
+1. provider profile 当前支持 `claude` 与 `opencode`。
+2. 二者主路径均走 ACP（ACP-first）。
+3. `claude` 可选 `legacy_cli` 仅作为 break-glass；`opencode` 不走 legacy_cli。
+
 ---
 
 ## 3. 运行链路（As-Built）
@@ -101,6 +107,7 @@ sequenceDiagram
 1. ingest 为 `poll`。
 2. 绑定联系人消息先发 ACK，再进入串行队列。
 3. 最终回复串行，顺序与入站顺序一致。
+4. `/service channel use` 的可选渠道与提示文案由 `service.channels.registry` 动态生成，不在主流程硬编码 `imessage`。
 
 ---
 
@@ -158,6 +165,13 @@ Perlica 到 provider 的生命周期：
 3. `session/prompt` 不做 Perlica 本地硬超时；只要 provider 进程仍在运行并持续输出进度/结果，即持续等待最终回包。
 4. 非 `session/prompt` 方法（`initialize/session/new/session/close`）仍保留超时保护。
 5. timeout/protocol/contract 错误直接上抛。
+6. ACPClient 同时兼容两类会话参数：
+   - `session_id + messages/tools/context`（内置 Claude adapter 形态）
+   - `sessionId + prompt`（OpenCode ACP 官方形态）
+7. `session/prompt` 结果归一化采用“主路径 + 保守回退”：
+   - 主路径：标准 `session/update.agent_message_chunk` 文本拼接。
+   - 回退路径：仅从白名单字段提取“用户可见回复文本”（如 `agent_message*` 变体、`result.message/text/content`）。
+   - 禁止：将 `agent_thought_chunk` 等思考文本作为最终回复输出。
 
 ### 4.6 ACP 交互确认子协议
 
@@ -172,6 +186,38 @@ Perlica 到 provider 的生命周期：
    - `/choose <index|text...>`：提交编号选择或自定义文本
 8. pending 存在时，非 slash 输入默认作为交互回答；service 远端入站启用 pending 快速通道，优先提交回答再继续业务链路。
 9. Claude provider 在 `permission_denials.tool_name=AskUserQuestion` 场景下会转换为交互请求（pending），并在同一次 `generate()` 内按回答继续后续轮次，直到产出最终结果或触发 `error_max_turns` 保护。
+
+### 4.6.1 OpenCode 解析兼容策略（As-Built）
+
+1. OpenCode 主路径仍遵循 ACP `session/update` + `session/prompt.result`。
+2. 当标准 `agent_message_chunk` 未命中但存在可见文本证据时，ACPClient 仅在“用户可见字段白名单”内做保守回退提取并继续返回用户文本。
+3. 回退提取命中时发事件 `acp.response.fallback_text_used`，便于排障与统计。
+4. 禁止将 `agent_thought_chunk`、推理草稿等 thought 字段作为最终回复回退输出。
+5. 若无可见文本且无 tool_calls，仍按合同失败处理（触发 `llm.invalid_response`）。
+
+### 4.7 串行任务状态机（Single Active Task）
+
+1. Runtime 维护单活动任务状态机：`IDLE -> RUNNING -> AWAITING_INTERACTION -> RUNNING -> COMPLETED/FAILED -> IDLE`。
+2. `Runner.run_text()` 启动任务并独占执行；同一时刻只允许一个活动任务。
+3. provider 在任务内发起 `session/request_permission` 时，状态转为 `AWAITING_INTERACTION`。
+4. 用户提交交互回答后，状态回到 `RUNNING`，继续等待同一任务最终结果。
+5. 聊天模式在 `RUNNING` 且非 `AWAITING_INTERACTION` 时拒绝新普通输入；service 模式按序排队，不抢占当前任务。
+6. 关键任务事件：
+   - `task.started`
+   - `task.state.changed`
+   - `task.command.deferred`
+   - `task.command.rejected`
+
+### 4.8 首次 Provider 选择状态（First-Run Provider Selection）
+
+1. 配置层新增 `model.provider_selected`。
+2. 首次 TTY 启动且 `provider_selected=false` 时，CLI 要求用户在 `claude|opencode` 中选择并持久化。
+3. 首次非TTY启动且 `provider_selected=false` 时，必须显式 `--provider`，否则退出码 `2`。
+4. 选择完成后写入：
+   - `model.default_provider`
+   - `model.provider_selected=true`
+5. 新会话 `provider_locked` 始终写入当前活动 provider（`claude` 或 `opencode`）。
+6. 运行时解析 provider 采用严格匹配：会话锁定 provider 未注册/不可用时直接失败，不隐式回退默认 provider。
 
 ---
 
@@ -198,7 +244,10 @@ Perlica 到 provider 的生命周期：
 
 1. `runtime.max_tool_calls`：保留字段，单轮模式下不驱动执行流程（no-op）。
 2. `runtime.max_summary_attempts`：保留字段，单轮模式下不触发模型摘要（no-op）。
-3. `providers.claude.acp.max_retries`：保留字段，ACPClient 单轮模式下不执行重试（no-op）。
+3. `providers.<provider>.acp.max_retries`：保留字段，ACPClient 单轮模式下不执行重试（no-op）。
+4. `model.provider_selected`：
+   - `false`：首次启动尚未完成 provider 选择。
+   - `true`：默认 provider 已确认，可直接运行。
 
 ---
 

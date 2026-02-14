@@ -36,7 +36,10 @@ class ChatController:
         normalized_provider = str(provider or "").strip().lower()
         if normalized_provider not in ALLOWED_PROVIDERS:
             raise ValueError(
-                "chat supports provider=claude only, got: {0}".format(provider)
+                "chat supports provider in [{0}], got: {1}".format(
+                    "|".join(ALLOWED_PROVIDERS),
+                    provider,
+                )
             )
 
         self._settings = load_settings(context_id=context_id, provider=normalized_provider)
@@ -156,6 +159,29 @@ class ChatController:
 
     def build_slash_hint_text(self, raw_input: str) -> str:
         return build_slash_hint(raw_input=raw_input, state=self._state).text
+
+    def busy_reject_message(self) -> str:
+        message = self._runtime.task_coordinator.reject_new_command_if_busy()
+        if message:
+            return message
+        return "上一条指令仍在执行中，请稍后再试。"
+
+    def emit_task_command_rejected(self, *, source: str, text: str) -> None:
+        snapshot = self._runtime.task_coordinator.snapshot()
+        conversation_id = snapshot.conversation_id or "cli.{0}".format(self._runtime.context_id)
+        self._runtime.emit(
+            "task.command.rejected",
+            {
+                "source": source,
+                "reason": "busy_running_task",
+                "state": snapshot.state.value,
+                "run_id": snapshot.run_id,
+                "input_preview": str(text or "")[:120],
+            },
+            conversation_id=conversation_id,
+            actor="tui",
+            run_id=snapshot.run_id or None,
+        )
 
     def set_phase(self, phase: str) -> None:
         self._phase = phase

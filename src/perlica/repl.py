@@ -10,7 +10,9 @@ from perlica.config import (
     ALLOWED_PROVIDERS,
     ProjectConfigError,
     initialize_project_config,
+    load_project_config,
     load_settings,
+    mark_provider_selected,
     project_config_exists,
 )
 from perlica.tui.controller import start_tui_chat
@@ -49,7 +51,16 @@ def start_repl(
             ),
         )
 
-    settings = load_settings(context_id=context_id, provider=validated_provider)
+    resolved_provider, selection_code = _resolve_provider_with_first_selection(
+        provider=validated_provider,
+        stdin_tty=_stdin_is_tty(),
+        stream=stream,
+        err_stream=err_stream,
+    )
+    if selection_code != 0:
+        return selection_code
+
+    settings = load_settings(context_id=context_id, provider=resolved_provider)
     resolved_provider = settings.provider
 
     if not _stdin_is_tty():
@@ -114,7 +125,16 @@ def start_service_mode(
             ),
         )
 
-    settings = load_settings(context_id=context_id, provider=validated_provider)
+    resolved_provider, selection_code = _resolve_provider_with_first_selection(
+        provider=validated_provider,
+        stdin_tty=_stdin_is_tty(),
+        stream=stream,
+        err_stream=err_stream,
+    )
+    if selection_code != 0:
+        return selection_code
+
+    settings = load_settings(context_id=context_id, provider=resolved_provider)
     resolved_provider = settings.provider
 
     if not _stdin_is_tty():
@@ -167,12 +187,117 @@ def _validate_provider(provider: Optional[str], stream: TextIO) -> Optional[str]
             stream,
             render_notice(
                 "error",
-                "不支持的 provider：{0}，当前仅支持：claude。".format(provider),
-                "Unsupported provider: {0}. Supported: claude.".format(provider),
+                "不支持的 provider：{0}，当前支持：{1}。".format(
+                    provider,
+                    "|".join(ALLOWED_PROVIDERS),
+                ),
+                "Unsupported provider: {0}. Supported: {1}.".format(
+                    provider,
+                    "|".join(ALLOWED_PROVIDERS),
+                ),
             ),
         )
         return None
     return normalized
+
+
+def _resolve_provider_with_first_selection(
+    *,
+    provider: Optional[str],
+    stdin_tty: bool,
+    stream: TextIO,
+    err_stream: TextIO,
+) -> tuple[Optional[str], int]:
+    try:
+        project_config = load_project_config()
+    except ProjectConfigError as exc:
+        _echo(err_stream, render_notice("error", str(exc)))
+        return None, 2
+
+    if project_config.provider_selected:
+        return provider, 0
+
+    if provider:
+        selected = mark_provider_selected(provider)
+        _echo(
+            stream,
+            render_notice(
+                "success",
+                "首次启动已选择 provider：{0}".format(selected),
+                "Selected provider for first launch: {0}".format(selected),
+            ),
+        )
+        return selected, 0
+
+    if not stdin_tty:
+        _echo(
+            err_stream,
+            render_notice(
+                "error",
+                "首次非交互运行必须显式指定 `--provider {0}`。".format("|".join(ALLOWED_PROVIDERS)),
+                "First non-interactive run requires `--provider {0}`.".format(
+                    "|".join(ALLOWED_PROVIDERS)
+                ),
+            ),
+        )
+        return None, 2
+
+    selected = _prompt_first_provider_selection(stream=stream, err_stream=err_stream)
+    if not selected:
+        _echo(
+            err_stream,
+            render_notice(
+                "error",
+                "未完成 provider 选择，已取消启动。",
+                "Provider selection cancelled.",
+            ),
+        )
+        return None, 2
+    persisted = mark_provider_selected(selected)
+    _echo(
+        stream,
+        render_notice(
+            "success",
+            "已保存默认 provider：{0}".format(persisted),
+            "Default provider saved: {0}".format(persisted),
+        ),
+    )
+    return persisted, 0
+
+
+def _prompt_first_provider_selection(stream: TextIO, err_stream: TextIO) -> Optional[str]:
+    choices = list(ALLOWED_PROVIDERS)
+    _echo(
+        stream,
+        render_notice(
+            "info",
+            "首次启动请选择 provider（只会询问一次）。",
+            "First launch: choose provider (one-time).",
+        ),
+    )
+    for index, provider_id in enumerate(choices, start=1):
+        _echo(stream, "{0}) {1}".format(index, provider_id))
+
+    while True:
+        _echo(stream, "请输入编号或 provider id (index/provider):")
+        answer = sys.stdin.readline()
+        if answer == "":
+            return None
+        text = answer.strip().lower()
+        if text in ALLOWED_PROVIDERS:
+            return text
+        if text.isdigit():
+            index = int(text)
+            if 1 <= index <= len(choices):
+                return choices[index - 1]
+        _echo(
+            err_stream,
+            render_notice(
+                "warn",
+                "无效选择，请输入编号或 {0}。".format("|".join(ALLOWED_PROVIDERS)),
+                "Invalid selection. Use index or {0}.".format("|".join(ALLOWED_PROVIDERS)),
+            ),
+        )
 
 
 def _emit_permission_probe_messages(report: dict, stream: TextIO) -> None:

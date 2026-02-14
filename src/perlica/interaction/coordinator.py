@@ -91,6 +91,21 @@ class InteractionCoordinator:
                 return None
             return self._request
 
+    def current_interaction_id(self) -> str:
+        with self._lock:
+            if self._request is None or self._answer is not None:
+                return ""
+            return str(self._request.interaction_id or "")
+
+    def belongs_to_run(self, run_id: str) -> bool:
+        normalized = str(run_id or "").strip()
+        if not normalized:
+            return False
+        with self._lock:
+            if self._request is None:
+                return False
+            return str(self._request.run_id or "").strip() == normalized
+
     def pending_hint_text(self) -> str:
         snapshot = self.snapshot()
         if not snapshot.has_pending:

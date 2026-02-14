@@ -178,6 +178,8 @@ if _HAS_TEXTUAL:
                 return
             pending = self._has_pending_interaction()
             if self._generation_active and not pending and not text.startswith("/"):
+                self._controller.emit_task_command_rejected(source="local", text=text)
+                self._append_system(self._controller.busy_reject_message())
                 return
             self._set_input_text("")
             self._submit_user_text(text)

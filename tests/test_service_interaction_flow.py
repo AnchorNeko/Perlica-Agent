@@ -189,8 +189,7 @@ def test_service_forwards_pending_interaction_to_bound_contact(isolated_env, mon
         )
 
         before = len(channel.sent)
-        with orchestrator._run_lock:
-            orchestrator._maybe_announce_pending_interaction_locked()
+        orchestrator._maybe_announce_pending_interaction()
         outbound = [item.text for item in channel.sent[before:]]
         assert outbound
         assert any("待确认交互" in text for text in outbound)
@@ -198,8 +197,7 @@ def test_service_forwards_pending_interaction_to_bound_contact(isolated_env, mon
 
         # Re-check should not duplicate for same interaction id.
         before_second = len(channel.sent)
-        with orchestrator._run_lock:
-            orchestrator._maybe_announce_pending_interaction_locked()
+        orchestrator._maybe_announce_pending_interaction()
         assert len(channel.sent) == before_second
     finally:
         orchestrator.stop()
@@ -272,7 +270,7 @@ def test_service_remote_choose_command_uses_fast_pending_path(isolated_env, monk
         runtime.close()
 
 
-def test_service_from_me_choose_can_answer_pending_via_fast_path(isolated_env, monkeypatch):
+def test_service_from_me_choose_is_ignored_under_strict_inbound_policy(isolated_env, monkeypatch):
     monkeypatch.setattr(orchestrator_module, "Runner", _FailRunner)
 
     settings = load_settings(context_id="default")
@@ -331,9 +329,8 @@ def test_service_from_me_choose_can_answer_pending_via_fast_path(isolated_env, m
         )
 
         outbound = [item.text for item in channel.sent[before:]]
-        assert outbound
-        assert any("交互回答已提交" in text for text in outbound)
-        assert runtime.interaction_coordinator.has_pending() is False
+        assert outbound == []
+        assert runtime.interaction_coordinator.has_pending() is True
     finally:
         orchestrator.stop()
         store.close()

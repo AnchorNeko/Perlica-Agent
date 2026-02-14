@@ -130,6 +130,8 @@ if _HAS_TEXTUAL:
             if not text:
                 return
             if self._busy and not self._controller.has_pending_interaction() and not text.startswith("/"):
+                self._controller.emit_task_command_rejected(source="local", text=text)
+                self._append_system(self._controller.busy_reject_message())
                 return
             self._set_input_text("")
             self._append_local(text)

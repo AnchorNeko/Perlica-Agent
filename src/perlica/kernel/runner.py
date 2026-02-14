@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from perlica.config import ALLOWED_PROVIDERS
 from perlica.kernel.policy_engine import ApprovalAction
 from perlica.kernel.session_store import (
     SessionMessageRecord,
@@ -96,179 +97,200 @@ class Runner:
         provider = self._runtime.resolve_provider(provider_id)
         if provider is None:
             raise ProviderError(
-                "provider '{0}' unavailable, try --provider claude".format(provider_id)
+                "provider '{0}' unavailable, try --provider {1}".format(
+                    provider_id,
+                    "|".join(ALLOWED_PROVIDERS),
+                )
             )
 
         conversation_id = "session.{0}".format(session.session_id)
         run_id = new_id("run")
         trace_id = new_id("trace")
-
-        self._runtime.emit(
-            "inbound.message.received",
-            {"text": text, "session_id": session.session_id},
-            conversation_id=conversation_id,
-            actor="cli",
+        started_task = self._runtime.task_coordinator.start_task(
             run_id=run_id,
-            trace_id=trace_id,
-        )
-
-        skill_selection = self._runtime.skill_engine.select(text)
-        self._emit_skill_events(skill_selection, conversation_id, run_id, trace_id)
-        self._current_skill_count = len(skill_selection.selected)
-        self._current_mcp_tools_count = len(self._runtime.mcp_manager.list_tool_specs())
-
-        self._update_progress(
-            "load-context",
+            conversation_id=conversation_id,
             session_id=session.session_id,
-            provider_id=provider_id,
+            metadata={"provider_id": provider_id},
         )
+        if not started_task:
+            busy_text = self._runtime.task_coordinator.reject_new_command_if_busy()
+            raise ProviderError(busy_text or "another task is still running")
 
-        system_prompt = str(getattr(self._runtime, "system_prompt", "") or "")
-        skill_prompt = self._runtime.skill_engine.build_prompt_context(skill_selection.selected)
-        mcp_context_blocks = self._runtime.mcp_prompt_context_blocks()
-        self._current_mcp_context_count = len(mcp_context_blocks)
-
-        history_messages, history_records, summary_used, estimated_tokens = self._load_context_messages(
-            session=session,
-            provider_id=provider_id,
-            user_text=text,
-            system_prompt=system_prompt,
-            skill_prompt=skill_prompt,
-            mcp_context_blocks=mcp_context_blocks,
-            conversation_id=conversation_id,
-            run_id=run_id,
-            trace_id=trace_id,
-        )
-
-        messages: List[Dict[str, str]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        if skill_prompt:
-            messages.append({"role": "system", "content": skill_prompt})
-        for block in mcp_context_blocks:
-            if block:
-                messages.append({"role": "system", "content": block})
-        messages.extend(history_messages)
-        messages.append({"role": "user", "content": text})
-
-        persist_entries: List[Dict[str, object]] = [{"role": "user", "content": {"text": text}}]
-
-        response = self._call_provider(
-            provider=provider,
-            provider_id=provider_id,
-            messages=messages,
-            conversation_id=conversation_id,
-            run_id=run_id,
-            trace_id=trace_id,
-            tools=self._runtime.tool_specs(),
-        )
-
-        persist_entries.append(
-            {
-                "role": "assistant",
-                "content": {
-                    "text": response.assistant_text,
-                    "finish_reason": response.finish_reason,
-                },
-            }
-        )
-
-        tool_results: List[ToolResult] = []
-        assistant_text = response.assistant_text
-
-        if response.tool_calls:
-            for call in response.tool_calls:
-                self._runtime.emit(
-                    "tool.blocked",
-                    {
-                        "reason": "single_call_mode_local_tool_dispatch_disabled",
-                        "tool_name": call.tool_name,
-                        "call_id": call.call_id,
-                        "run_id": run_id,
-                    },
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    trace_id=trace_id,
-                    actor="runner",
-                )
-                blocked_result = ToolResult(
-                    call_id=call.call_id,
-                    ok=False,
-                    output={},
-                    error="single_call_mode_local_tool_dispatch_disabled",
-                )
-                tool_results.append(blocked_result)
-                self._runtime.emit(
-                    "tool.result",
-                    {
-                        "call_id": blocked_result.call_id,
-                        "ok": blocked_result.ok,
-                        "error": blocked_result.error,
-                        "output": blocked_result.output,
-                    },
-                    conversation_id=conversation_id,
-                    run_id=run_id,
-                    trace_id=trace_id,
-                    actor="runner",
-                )
-                persist_entries.append(
-                    {
-                        "role": "tool",
-                        "content": {
-                            "name": call.tool_name,
-                            "call_id": call.call_id,
-                            "result": blocked_result.as_message(),
-                        },
-                    }
-                )
-
-        self._runtime.emit(
-            "llm.single_call.enforced",
-            {
-                "provider_id": provider_id,
-                "blocked_tool_calls_count": len(response.tool_calls),
-                "run_id": run_id,
-            },
-            conversation_id=conversation_id,
-            run_id=run_id,
-            trace_id=trace_id,
-            actor="runner",
-        )
-
-        self._update_progress(
-            "finalize",
-            session_id=session.session_id,
-            provider_id=provider_id,
-        )
-
-        for entry in persist_entries:
-            self._runtime.session_store.append_message(
-                session_id=session.session_id,
-                role=str(entry["role"]),
-                content=dict(entry["content"]),
+        try:
+            self._runtime.emit(
+                "inbound.message.received",
+                {"text": text, "session_id": session.session_id},
+                conversation_id=conversation_id,
+                actor="cli",
                 run_id=run_id,
+                trace_id=trace_id,
             )
 
-        self._runtime.session_store.touch_session(session.session_id)
-        totals = self._totals_from_call_usages(self._llm_call_usages)
+            skill_selection = self._runtime.skill_engine.select(text)
+            self._emit_skill_events(skill_selection, conversation_id, run_id, trace_id)
+            self._current_skill_count = len(skill_selection.selected)
+            self._current_mcp_tools_count = len(self._runtime.mcp_manager.list_tool_specs())
 
-        return RunnerResult(
-            assistant_text=assistant_text,
-            run_id=run_id,
-            trace_id=trace_id,
-            conversation_id=conversation_id,
-            session_id=session.session_id,
-            session_name=session.name,
-            provider_id=provider_id,
-            context_usage={
-                "history_messages_included": len(history_records),
-                "summary_versions_used": 1 if summary_used is not None else 0,
-                "estimated_context_tokens": estimated_tokens,
-            },
-            llm_call_usages=list(self._llm_call_usages),
-            total_usage=totals,
-            tool_results=tool_results,
-        )
+            self._update_progress(
+                "load-context",
+                session_id=session.session_id,
+                provider_id=provider_id,
+            )
+
+            system_prompt = str(getattr(self._runtime, "system_prompt", "") or "")
+            skill_prompt = self._runtime.skill_engine.build_prompt_context(skill_selection.selected)
+            mcp_context_blocks = self._runtime.mcp_prompt_context_blocks()
+            self._current_mcp_context_count = len(mcp_context_blocks)
+
+            history_messages, history_records, summary_used, estimated_tokens = self._load_context_messages(
+                session=session,
+                provider_id=provider_id,
+                user_text=text,
+                system_prompt=system_prompt,
+                skill_prompt=skill_prompt,
+                mcp_context_blocks=mcp_context_blocks,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                trace_id=trace_id,
+            )
+
+            messages: List[Dict[str, str]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            if skill_prompt:
+                messages.append({"role": "system", "content": skill_prompt})
+            for block in mcp_context_blocks:
+                if block:
+                    messages.append({"role": "system", "content": block})
+            messages.extend(history_messages)
+            messages.append({"role": "user", "content": text})
+
+            persist_entries: List[Dict[str, object]] = [{"role": "user", "content": {"text": text}}]
+
+            response = self._call_provider(
+                provider=provider,
+                provider_id=provider_id,
+                messages=messages,
+                conversation_id=conversation_id,
+                run_id=run_id,
+                trace_id=trace_id,
+                tools=self._runtime.tool_specs(),
+            )
+
+            persist_entries.append(
+                {
+                    "role": "assistant",
+                    "content": {
+                        "text": response.assistant_text,
+                        "finish_reason": response.finish_reason,
+                    },
+                }
+            )
+
+            tool_results: List[ToolResult] = []
+            assistant_text = response.assistant_text
+
+            if response.tool_calls:
+                for call in response.tool_calls:
+                    self._runtime.emit(
+                        "tool.blocked",
+                        {
+                            "reason": "single_call_mode_local_tool_dispatch_disabled",
+                            "tool_name": call.tool_name,
+                            "call_id": call.call_id,
+                            "run_id": run_id,
+                        },
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        actor="runner",
+                    )
+                    blocked_result = ToolResult(
+                        call_id=call.call_id,
+                        ok=False,
+                        output={},
+                        error="single_call_mode_local_tool_dispatch_disabled",
+                    )
+                    tool_results.append(blocked_result)
+                    self._runtime.emit(
+                        "tool.result",
+                        {
+                            "call_id": blocked_result.call_id,
+                            "ok": blocked_result.ok,
+                            "error": blocked_result.error,
+                            "output": blocked_result.output,
+                        },
+                        conversation_id=conversation_id,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        actor="runner",
+                    )
+                    persist_entries.append(
+                        {
+                            "role": "tool",
+                            "content": {
+                                "name": call.tool_name,
+                                "call_id": call.call_id,
+                                "result": blocked_result.as_message(),
+                            },
+                        }
+                    )
+
+            self._runtime.emit(
+                "llm.single_call.enforced",
+                {
+                    "provider_id": provider_id,
+                    "blocked_tool_calls_count": len(response.tool_calls),
+                    "run_id": run_id,
+                },
+                conversation_id=conversation_id,
+                run_id=run_id,
+                trace_id=trace_id,
+                actor="runner",
+            )
+
+            self._update_progress(
+                "finalize",
+                session_id=session.session_id,
+                provider_id=provider_id,
+            )
+
+            for entry in persist_entries:
+                self._runtime.session_store.append_message(
+                    session_id=session.session_id,
+                    role=str(entry["role"]),
+                    content=dict(entry["content"]),
+                    run_id=run_id,
+                )
+
+            self._runtime.session_store.touch_session(session.session_id)
+            totals = self._totals_from_call_usages(self._llm_call_usages)
+
+            return RunnerResult(
+                assistant_text=assistant_text,
+                run_id=run_id,
+                trace_id=trace_id,
+                conversation_id=conversation_id,
+                session_id=session.session_id,
+                session_name=session.name,
+                provider_id=provider_id,
+                context_usage={
+                    "history_messages_included": len(history_records),
+                    "summary_versions_used": 1 if summary_used is not None else 0,
+                    "estimated_context_tokens": estimated_tokens,
+                },
+                llm_call_usages=list(self._llm_call_usages),
+                total_usage=totals,
+                tool_results=tool_results,
+            )
+        except Exception:
+            self._runtime.task_coordinator.finish_task(run_id=run_id, failed=True)
+            raise
+        finally:
+            # Ensure task state is released for the next command.
+            snapshot = self._runtime.task_coordinator.snapshot()
+            if snapshot.run_id == run_id and snapshot.has_active_task:
+                self._runtime.task_coordinator.finish_task(run_id=run_id, failed=False)
 
     def _resolve_provider_for_session(self, session: SessionRecord) -> str:
         if session.provider_locked:
@@ -284,8 +306,9 @@ class Runner:
         if self._requested_provider_id:
             return self._requested_provider_id
         raise ProviderError(
-            "session '{0}' has no locked provider, please specify --provider claude".format(
-                session.session_id
+            "session '{0}' has no locked provider, please specify --provider {1}".format(
+                session.session_id,
+                "|".join(ALLOWED_PROVIDERS),
             )
         )
 

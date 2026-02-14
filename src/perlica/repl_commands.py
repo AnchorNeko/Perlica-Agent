@@ -107,7 +107,7 @@ _TOP_LEVEL_COMMAND_SPECS: Dict[str, CommandSpec] = {
     "service": CommandSpec(
         name="service",
         subcommands=("status", "rebind", "unpair", "channel", "tools"),
-        examples=("/service status", "/service channel use imessage"),
+        examples=("/service status", "/service channel use <channel_id>"),
     ),
     "save": CommandSpec(name="save", values=("<name 可选>",), examples=("/save demo",)),
     "discard": CommandSpec(name="discard", examples=("/discard",)),
@@ -117,7 +117,7 @@ _TOP_LEVEL_COMMAND_SPECS: Dict[str, CommandSpec] = {
 
 _TOP_LEVEL_ORDER: Tuple[str, ...] = tuple(_TOP_LEVEL_COMMAND_SPECS.keys())
 _MENU_ROOTS: Tuple[str, ...] = ("session", "doctor", "mcp", "skill", "policy", "service")
-_PROVIDER_VALUES: Tuple[str, ...] = ("claude",)
+_PROVIDER_VALUES: Tuple[str, ...] = tuple(ALLOWED_PROVIDERS)
 _SESSION_NEW_OPTIONS: Tuple[str, ...] = ("--name", "--provider")
 _SESSION_LIST_OPTIONS: Tuple[str, ...] = ("--all",)
 _SESSION_USE_OPTIONS: Tuple[str, ...] = ("--all",)
@@ -128,9 +128,44 @@ _POLICY_RESET_OPTIONS: Tuple[str, ...] = ("--all", "--tool", "--risk")
 _RISK_VALUES: Tuple[str, ...] = ("low", "medium", "high")
 _SERVICE_SUBCOMMANDS: Tuple[str, ...] = ("status", "rebind", "unpair", "channel", "tools")
 _SERVICE_CHANNEL_SUBCOMMANDS: Tuple[str, ...] = ("list", "use", "current")
-_SERVICE_CHANNEL_VALUES: Tuple[str, ...] = ("imessage",)
 _SERVICE_TOOLS_SUBCOMMANDS: Tuple[str, ...] = ("list", "allow", "deny")
 _MCP_SUBCOMMANDS: Tuple[str, ...] = ("list", "reload", "status")
+
+
+def _service_channel_values() -> Tuple[str, ...]:
+    try:
+        from perlica.service.channels import list_channel_registrations
+
+        values = tuple(
+            str(item.channel_id).strip().lower()
+            for item in list_channel_registrations()
+            if str(item.channel_id or "").strip()
+        )
+        if values:
+            return values
+    except Exception:
+        pass
+    return ("<channel_id>",)
+
+
+def _service_channel_use_example(values: Tuple[str, ...]) -> str:
+    if values and values[0] != "<channel_id>":
+        return "/service channel use {0}".format(values[0])
+    return "/service channel use <channel_id>"
+
+
+def _service_channel_required_notice() -> Tuple[str, str]:
+    values = _service_channel_values()
+    if values and values[0] != "<channel_id>":
+        channel_id = values[0]
+        return (
+            "请提供渠道 ID，例如 `{0}`（可先用 `/service channel list`）。".format(channel_id),
+            "Channel id is required, e.g. `{0}` (use `/service channel list` to inspect).".format(channel_id),
+        )
+    return (
+        "请提供渠道 ID，格式如 `<channel_id>`（可先用 `/service channel list`）。",
+        "Channel id is required, e.g. `<channel_id>` (use `/service channel list` to inspect).",
+    )
 
 
 def dispatch_slash_command(
@@ -396,7 +431,11 @@ def _hint_session_new(rest: List[str], trailing_space: bool) -> HintResult:
     if trailing_space and rest[-1] == "--name":
         return _hint_with(path="/session new", suggestions=["<alias>"], example="/session new --name demo")
     if trailing_space and rest[-1] == "--provider":
-        return _hint_with(path="/session new", suggestions=list(_PROVIDER_VALUES), example="/session new --provider claude")
+        return _hint_with(
+            path="/session new",
+            suggestions=list(_PROVIDER_VALUES),
+            example="/session new --provider {0}".format(_PROVIDER_VALUES[0]),
+        )
 
     if len(rest) >= 2 and rest[-2] == "--provider" and not trailing_space:
         matches = _match_prefix(_PROVIDER_VALUES, rest[-1])
@@ -565,11 +604,13 @@ def _hint_service(args: List[str], trailing_space: bool, state: Optional[ReplSta
 
     # /service channel ...
     rest = args[1:]
+    channel_values = _service_channel_values()
+    channel_example = _service_channel_use_example(channel_values)
     if not rest:
         return _hint_with(
             path="/service channel",
             suggestions=list(_SERVICE_CHANNEL_SUBCOMMANDS),
-            example="/service channel use imessage",
+            example=channel_example,
         )
 
     channel_sub = rest[0].lower()
@@ -586,16 +627,16 @@ def _hint_service(args: List[str], trailing_space: bool, state: Optional[ReplSta
     if not use_rest:
         return _hint_with(
             path="/service channel use",
-            suggestions=list(_SERVICE_CHANNEL_VALUES),
-            example="/service channel use imessage",
+            suggestions=list(channel_values),
+            example=channel_example,
         )
 
     if not trailing_space:
-        matched_values = _match_prefix(_SERVICE_CHANNEL_VALUES, use_rest[-1].lower())
+        matched_values = _match_prefix(channel_values, use_rest[-1].lower())
         return _hint_with(
             path="/service channel use",
-            suggestions=matched_values or list(_SERVICE_CHANNEL_VALUES),
-            example="/service channel use imessage",
+            suggestions=matched_values or list(channel_values),
+            example=channel_example,
         )
 
     return _hint_with(path="/service channel use", suggestions=[], note="参数已齐全，回车执行。")
@@ -778,8 +819,8 @@ def _dispatch_parts(parts: List[str], state: ReplState, stream: TextIO) -> ReplD
             stream,
             render_notice(
                 "error",
-                "命令 `/model` 已移除。当前默认模型为 claude，可在配置文件中调整。",
-                "Command `/model` was removed. Default model is claude.",
+                "命令 `/model` 已移除。当前默认 provider 由配置决定。",
+                "Command `/model` was removed. Default provider comes from config.",
             ),
         )
         return ReplDispatchResult(handled=True)
@@ -796,7 +837,7 @@ def _dispatch_parts(parts: List[str], state: ReplState, stream: TextIO) -> ReplD
 
 def _dispatch_menu(root: str, stream: TextIO) -> None:
     menu_lines: Dict[str, str] = {
-        "session": "list [--all] | new [--name NAME] [--provider claude] | use <ref> | current",
+        "session": "list [--all] | new [--name NAME] [--provider <provider_id>] | use <ref> | current",
         "doctor": "--format json|text [--verbose]",
         "mcp": "list | reload | status",
         "skill": "list | reload",
@@ -976,7 +1017,8 @@ def _handle_service_channel(args: List[str], hooks: ServiceCommandHooks, stream:
 
     if sub == "use":
         if len(args) < 2:
-            _echo(stream, render_notice("error", "请提供渠道 ID，例如 imessage。", "Channel id is required."))
+            zh, en = _service_channel_required_notice()
+            _echo(stream, render_notice("error", zh, en))
             return
         if callable(hooks.channel_use):
             _echo(stream, hooks.channel_use(args[1]))
@@ -1156,8 +1198,14 @@ def _handle_session(args: List[str], state: ReplState, stream: TextIO) -> None:
                     stream,
                     render_notice(
                         "error",
-                        "不支持的 provider：{0}，当前仅支持：claude。".format(provider),
-                        "Unsupported provider: {0}. Supported: claude.".format(provider),
+                        "不支持的 provider：{0}，当前支持：{1}。".format(
+                            provider,
+                            "|".join(ALLOWED_PROVIDERS),
+                        ),
+                        "Unsupported provider: {0}. Supported: {1}.".format(
+                            provider,
+                            "|".join(ALLOWED_PROVIDERS),
+                        ),
                     ),
                 )
                 return

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import queue
 import threading
-import time
 from collections import deque
 from typing import Deque
 from typing import Callable, Optional
@@ -65,6 +64,8 @@ class ServiceOrchestrator:
         self._last_bound_inbound_at_ms: Optional[int] = None
         self._recent_inbound_event_ids: Deque[str] = deque(maxlen=256)
         self._recent_inbound_event_id_set = set()
+        self._duplicate_notice_event_ids: Deque[str] = deque(maxlen=256)
+        self._duplicate_notice_event_id_set = set()
         self._acked_inbound_event_ids: Deque[str] = deque(maxlen=512)
         self._acked_inbound_event_id_set = set()
         self._queue_depth = 0
@@ -72,6 +73,7 @@ class ServiceOrchestrator:
         self._queue_busy = False
         self._queue_depth_last_reported = 0
         self._pending_announced_interaction_id = ""
+        self._pending_announce_lock = threading.Lock()
         self._service_started_at_ms = now_ms()
         self._poll_since_ts_ms = self._service_started_at_ms
 
@@ -338,10 +340,8 @@ class ServiceOrchestrator:
     def _on_channel_message(self, inbound: ChannelInboundMessage) -> None:
         if not self._running:
             return
-        if self._try_submit_pending_answer_fast(inbound, source="remote"):
-            return
         with self._run_lock:
-            if self._try_submit_pending_answer_locked(inbound, source="remote"):
+            if self._route_pending_interaction_locked(inbound, source="remote"):
                 return
             self._maybe_send_fast_ack_locked(inbound)
         self._queue.put(inbound)
@@ -356,9 +356,10 @@ class ServiceOrchestrator:
                 contact_id=inbound.contact_id,
                 chat_id=inbound.chat_id,
                 meta={
-                    "event_type": "inbound.queued",
+                    "event_type": "task.command.deferred",
                     "direction": "inbound",
                     "queue_depth": self._queue_depth,
+                    "run_state": self._runtime.task_coordinator.snapshot().state.value,
                 },
             )
 
@@ -378,15 +379,14 @@ class ServiceOrchestrator:
             try:
                 inbound = self._queue.get(timeout=0.2)
             except queue.Empty:
-                with self._run_lock:
-                    self._maybe_announce_pending_interaction_locked()
+                self._maybe_announce_pending_interaction()
                 continue
 
             try:
                 self._queue_busy = True
                 self._queue_depth = self._queue.qsize()
                 self._process_inbound(inbound)
-                self._maybe_announce_pending_interaction_locked()
+                self._maybe_announce_pending_interaction()
             except Exception as exc:  # pragma: no cover - defensive
                 self._emit(
                     "error",
@@ -408,19 +408,29 @@ class ServiceOrchestrator:
             if dedupe_key:
                 if self._is_duplicate_inbound_event_id(dedupe_key):
                     self._ignored_messages += 1
-                    self._emit(
-                        "telemetry",
-                        "忽略重复事件。",
-                        contact_id=inbound.contact_id,
-                        chat_id=inbound.chat_id,
-                        meta={
-                            "event_type": "inbound.ignored",
-                            "direction": "inbound",
-                            "reason": "duplicate_event",
-                            "event_id": inbound.event_id,
-                            "dedupe_key": dedupe_key,
-                        },
-                    )
+                    event_id = str(inbound.event_id or "").strip()
+                    if event_id and event_id not in self._duplicate_notice_event_id_set:
+                        if (
+                            len(self._duplicate_notice_event_ids)
+                            >= self._duplicate_notice_event_ids.maxlen
+                        ):
+                            oldest = self._duplicate_notice_event_ids.popleft()
+                            self._duplicate_notice_event_id_set.discard(oldest)
+                        self._duplicate_notice_event_ids.append(event_id)
+                        self._duplicate_notice_event_id_set.add(event_id)
+                        self._emit(
+                            "telemetry",
+                            "忽略重复事件。",
+                            contact_id=inbound.contact_id,
+                            chat_id=inbound.chat_id,
+                            meta={
+                                "event_type": "inbound.ignored",
+                                "direction": "inbound",
+                                "reason": "duplicate_event",
+                                "event_id": inbound.event_id,
+                                "dedupe_key": dedupe_key,
+                            },
+                        )
                     return
                 self._mark_inbound_event_id(dedupe_key)
 
@@ -518,7 +528,7 @@ class ServiceOrchestrator:
             "Interaction answer rejected.",
         )
 
-    def _try_submit_pending_answer_locked(self, inbound: ChannelInboundMessage, source: str) -> bool:
+    def _route_pending_interaction_locked(self, inbound: ChannelInboundMessage, source: str) -> bool:
         if not self.has_pending_interaction():
             return False
         if inbound.is_from_me:
@@ -529,10 +539,29 @@ class ServiceOrchestrator:
         stripped = inbound.text.strip()
         if not stripped:
             return False
-        if stripped.startswith("/"):
+
+        if stripped == "/pending":
+            self._send_reply_locked(self.pending_interaction_text(), purpose="reply")
+            return True
+
+        answer_text = stripped
+        if stripped.startswith("/choose"):
+            answer_text = stripped[len("/choose") :].strip()
+            if not answer_text:
+                self._send_reply_locked(
+                    render_notice(
+                        "warn",
+                        "请输入 `/choose <编号|文本>`。",
+                        "Use `/choose <index|text>`.",
+                    ),
+                    purpose="reply",
+                )
+                return True
+        elif stripped.startswith("/"):
+            # Keep other slash commands on normal service command path.
             return False
 
-        result = self._runtime.interaction_coordinator.submit_answer(stripped, source=source)
+        result = self._runtime.interaction_coordinator.submit_answer(answer_text, source=source)
         if result.accepted:
             self._received_bound_messages += 1
             self._last_bound_inbound_at_ms = inbound.ts_ms or None
@@ -579,125 +608,18 @@ class ServiceOrchestrator:
         )
         return True
 
-    def _try_submit_pending_answer_fast(self, inbound: ChannelInboundMessage, source: str) -> bool:
-        stripped = inbound.text.strip()
-        if not stripped:
-            return False
-
-        is_choose_command = stripped.startswith("/choose")
-        is_pending_command = stripped == "/pending"
-
-        if not self._binding.paired or not self._binding.contact_id:
-            return False
-        inbound_contact = self._channel.normalize_contact_id(inbound.contact_id)
-        bound_contact = str(self._binding.contact_id or "").strip()
-        same_contact = inbound_contact == bound_contact
-        same_chat = bool(
-            self._binding.chat_id
-            and inbound.chat_id
-            and str(inbound.chat_id).strip() == str(self._binding.chat_id).strip()
-        )
-        allow_same_chat_override = bool(inbound.is_from_me and (is_choose_command or is_pending_command) and same_chat)
-        if not same_contact and not allow_same_chat_override:
-            return False
-
-        allow_from_me_override = bool(inbound.is_from_me and (is_choose_command or is_pending_command))
-        if inbound.is_from_me and not allow_from_me_override:
-            return False
-
-        # Remote /pending should be responsive even while worker thread is busy.
-        if is_pending_command:
-            self._send_reply_locked(self.pending_interaction_text(), purpose="reply")
-            if allow_from_me_override:
-                self._emit(
-                    "telemetry",
-                    "from_me 消息通过快速通道处理（pending）。",
-                    contact_id=inbound.contact_id,
-                    chat_id=inbound.chat_id,
-                    meta={
-                        "event_type": "interaction.answer.from_me_override",
-                        "direction": "inbound",
-                        "source": source,
-                        "raw_input": stripped,
-                        "same_chat_override": bool(allow_same_chat_override),
-                    },
-                )
-            return True
-
-        if not self.has_pending_interaction():
-            return False
-
-        answer_text = stripped
-        if is_choose_command:
-            answer_text = stripped[len("/choose") :].strip()
-            if not answer_text:
-                self._send_reply_locked(
-                    render_notice(
-                        "warn",
-                        "请输入 `/choose <编号|文本>`。",
-                        "Use `/choose <index|text>`.",
-                    ),
-                    purpose="reply",
-                )
-                return True
-        elif stripped.startswith("/"):
-            # Keep other slash commands on normal service command path.
-            return False
-
-        result = self._runtime.interaction_coordinator.submit_answer(answer_text, source=source)
-        if result.accepted:
-            self._received_bound_messages += 1
-            self._last_bound_inbound_at_ms = inbound.ts_ms or None
-            self._emit(
-                "inbound",
-                inbound.text,
-                contact_id=inbound.contact_id,
-                chat_id=inbound.chat_id,
-                meta={
-                    "event_type": "interaction.answer.inbound",
-                    "direction": "inbound",
-                    "source": source,
-                    "path": "fast",
-                    "raw_input": stripped,
-                },
-            )
-            self._send_ack_locked(inbound)
-            self._send_reply_locked(
-                render_notice(
-                    "success",
-                    "交互回答已提交，继续执行中。",
-                    "Interaction answer submitted. Continuing execution.",
-                ),
-                purpose="reply",
-            )
-            self._emit(
-                "telemetry",
-                "快速通道已提交交互回答。",
-                contact_id=inbound.contact_id,
-                chat_id=inbound.chat_id,
-                meta={
-                    "event_type": "interaction.answer.fast_submitted",
-                    "direction": "inbound",
-                    "source": source,
-                    "raw_input": stripped,
-                    "answer_text": answer_text,
-                    "from_me_override": bool(allow_from_me_override),
-                    "same_chat_override": bool(allow_same_chat_override),
-                },
-            )
-            return True
-        return False
-
-    def _maybe_announce_pending_interaction_locked(self) -> None:
+    def _maybe_announce_pending_interaction(self) -> None:
         snapshot = self._runtime.interaction_coordinator.snapshot()
         if not snapshot.has_pending:
-            self._pending_announced_interaction_id = ""
+            with self._pending_announce_lock:
+                self._pending_announced_interaction_id = ""
             return
         interaction_id = str(snapshot.interaction_id or "").strip()
         if not interaction_id:
             return
-        if interaction_id == self._pending_announced_interaction_id:
-            return
+        with self._pending_announce_lock:
+            if interaction_id == self._pending_announced_interaction_id:
+                return
         if not self._binding.paired or not self._binding.contact_id:
             return
 
@@ -723,53 +645,17 @@ class ServiceOrchestrator:
                 "interaction_id": interaction_id,
             },
         )
-        self._pending_announced_interaction_id = interaction_id
+        with self._pending_announce_lock:
+            self._pending_announced_interaction_id = interaction_id
 
     def _pending_watch_loop(self) -> None:
         while self._running:
             try:
-                self._maybe_announce_pending_interaction_nolock()
+                self._maybe_announce_pending_interaction()
             except Exception:
                 # Best-effort watcher; do not break service loop.
                 pass
-            time.sleep(0.2)
-
-    def _maybe_announce_pending_interaction_nolock(self) -> None:
-        snapshot = self._runtime.interaction_coordinator.snapshot()
-        if not snapshot.has_pending:
-            self._pending_announced_interaction_id = ""
-            return
-        interaction_id = str(snapshot.interaction_id or "").strip()
-        if not interaction_id:
-            return
-        if interaction_id == self._pending_announced_interaction_id:
-            return
-        if not self._binding.paired or not self._binding.contact_id:
-            return
-
-        pending_text = self.pending_interaction_text().strip()
-        if not pending_text:
-            return
-
-        message = "检测到待确认交互，请直接回复编号或文本：\n{0}".format(pending_text)
-        self._send_message_locked(
-            contact_id=self._binding.contact_id,
-            chat_id=self._binding.chat_id,
-            text=message,
-            purpose="interaction_prompt",
-        )
-        self._emit(
-            "telemetry",
-            "已将待确认交互推送到远端联系人。",
-            contact_id=self._binding.contact_id,
-            chat_id=self._binding.chat_id,
-            meta={
-                "event_type": "interaction.prompt.forwarded",
-                "direction": "outbound",
-                "interaction_id": interaction_id,
-            },
-        )
-        self._pending_announced_interaction_id = interaction_id
+            self._pair_poll_stop.wait(0.2)
 
     def _process_pairing_message_locked(self, inbound: ChannelInboundMessage) -> None:
         stripped = inbound.text.strip()
@@ -1384,16 +1270,6 @@ class ServiceOrchestrator:
                     with self._run_lock:
                         if latest_polled_ts_ms + 1 > int(self._poll_since_ts_ms or 0):
                             self._poll_since_ts_ms = latest_polled_ts_ms + 1
-                if polled_messages:
-                    self._emit(
-                        "telemetry",
-                        "poll 捕获到 {0} 条消息。".format(len(polled_messages)),
-                        meta={
-                            "event_type": "inbound.polled",
-                            "direction": "inbound",
-                            "count": len(polled_messages),
-                        },
-                    )
                 for message in polled_messages or []:
                     self._on_channel_message(message)
             except Exception as exc:

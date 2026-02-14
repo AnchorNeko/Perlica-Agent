@@ -169,10 +169,7 @@ class IMessageChannelAdapter:
             )
             for message in history:
                 same_contact = self.normalize_contact_id(message.contact_id) == target_contact
-                if not same_contact and not self._allow_pending_command_fallback(
-                    message=message,
-                    bound_chat_id=chat_id,
-                ):
+                if not same_contact:
                     continue
                 if since_ts_ms is not None and int(message.ts_ms or 0) < int(since_ts_ms):
                     continue
@@ -194,28 +191,6 @@ class IMessageChannelAdapter:
             seen.add(dedupe_key)
             unique.append(message)
         return unique
-
-    @staticmethod
-    def _allow_pending_command_fallback(
-        *,
-        message: ChannelInboundMessage,
-        bound_chat_id: Optional[str],
-    ) -> bool:
-        """Allow pending-answer commands from same chat when sender id is rewritten.
-
-        Some iMessage paths may mark a user reply as `is_from_me=true` and change
-        the sender id. We still want `/choose` and `/pending` to reach service
-        pending fast-path in that bounded chat.
-        """
-
-        if not bound_chat_id:
-            return False
-        if str(message.chat_id or "").strip() != str(bound_chat_id or "").strip():
-            return False
-        text = str(message.text or "").strip()
-        if not text:
-            return False
-        return text.startswith("/choose") or text == "/pending"
 
     def health_snapshot(self) -> ChannelHealthSnapshot:
         with self._health_lock:

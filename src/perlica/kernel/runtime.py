@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from perlica.config import Settings
+from perlica.config import ALLOWED_PROVIDERS, Settings
 from perlica.interaction.coordinator import InteractionCoordinator
 from perlica.interaction.types import InteractionRequest
 from perlica.kernel.debug_log import DebugLogWriter
@@ -26,6 +26,7 @@ from perlica.providers.factory import ProviderFactory
 from perlica.security.permission_probe import run_startup_permission_checks
 from perlica.skills.engine import SkillEngine
 from perlica.skills.loader import SkillLoader
+from perlica.task.coordinator import TaskCoordinator
 from perlica.tools.mcp_tool import MCPTool
 from perlica.tools.shell_tool import ShellTool
 
@@ -86,6 +87,7 @@ class Runtime:
         self.event_bus = EventBus()
         self.registry = Registry()
         self.interaction_coordinator = InteractionCoordinator(event_sink=self._emit_interaction_event)
+        self.task_coordinator = TaskCoordinator(event_sink=self._emit_task_event)
 
         self.approval_store = ApprovalStore(self.context_dir / "approvals.db")
         self.session_store = SessionStore(self.context_dir / "sessions.db")
@@ -133,6 +135,10 @@ class Runtime:
         self._register_mcp_tools()
 
     def _resolve_provider_interaction_request(self, request: InteractionRequest):
+        self.task_coordinator.mark_waiting_interaction(
+            interaction_id=request.interaction_id,
+            run_id=request.run_id or None,
+        )
         self.log_diagnostic(
             level="info",
             component="interaction",
@@ -153,6 +159,7 @@ class Runtime:
         )
         self.interaction_coordinator.publish(request)
         answer = self.interaction_coordinator.wait_for_answer(request.interaction_id)
+        self.task_coordinator.submit_interaction_answer(interaction_id=request.interaction_id)
         return answer
 
     def _emit_provider_event(self, event_type: str, payload: Dict[str, Any], context: Dict[str, Any]) -> None:
@@ -191,6 +198,27 @@ class Runtime:
             conversation_id=conversation_id,
             run_id=run_id if run_id else None,
             trace_id=trace_id if trace_id else None,
+            message=event_type,
+            data=dict(payload),
+        )
+
+    def _emit_task_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        conversation_id = str(payload.get("conversation_id") or "cli.{0}".format(self.context_id))
+        run_id = str(payload.get("run_id") or "").strip()
+        self.emit(
+            event_type,
+            dict(payload),
+            conversation_id=conversation_id,
+            actor="task",
+            run_id=run_id if run_id else None,
+        )
+        self.log_diagnostic(
+            level="info",
+            component="task",
+            kind="lifecycle",
+            event_type=event_type,
+            conversation_id=conversation_id,
+            run_id=run_id if run_id else None,
             message=event_type,
             data=dict(payload),
         )
@@ -378,10 +406,7 @@ class Runtime:
         self.registry.register_provider(provider)  # type: ignore[arg-type]
 
     def resolve_provider(self, provider_id: str):
-        provider = self.registry.get_provider(provider_id)
-        if provider is not None:
-            return provider
-        return self.registry.get_provider(self.settings.provider)
+        return self.registry.get_provider(provider_id)
 
     def tool_specs(self) -> List[Dict[str, Any]]:
         specs: List[Dict[str, Any]] = []
@@ -443,6 +468,7 @@ class Runtime:
             "context_dir": str(self.context_dir),
             "providers": {
                 "claude": bool(which("claude")),
+                "opencode": bool(which("opencode")),
             },
             "active_provider": self.settings.provider,
             "provider_profile_enabled": bool(self.settings.provider_profile.enabled),
@@ -496,7 +522,11 @@ class Runtime:
             return current
         provider_id = str(self.settings.provider or "").strip().lower()
         if not provider_id:
-            raise RuntimeError("missing provider for new session, use --provider claude")
+            raise RuntimeError(
+                "missing provider for new session, use --provider {0}".format(
+                    "|".join(ALLOWED_PROVIDERS)
+                )
+            )
         created = self.session_store.create_session(
             context_id=self.context_id,
             provider_locked=provider_id,

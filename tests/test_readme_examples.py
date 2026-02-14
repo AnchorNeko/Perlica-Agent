@@ -12,7 +12,7 @@ def test_readme_contains_interactive_first_examples():
     assert "perlica chat" in text
     assert "perlica --service" in text
     assert "/service status" in text
-    assert "/service channel use imessage" in text
+    assert "/service channel use <channel_id>" in text
     assert "/clear" in text
     assert "/pending" in text
     assert "/choose <index|text...>" in text

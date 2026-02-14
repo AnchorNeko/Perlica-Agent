@@ -7,11 +7,14 @@ from typing import Dict, List
 
 
 DEFAULT_PROVIDER_ID = "claude"
-ALLOWED_PROVIDER_IDS = (DEFAULT_PROVIDER_ID,)
+OPENCODE_PROVIDER_ID = "opencode"
+ALLOWED_PROVIDER_IDS = (DEFAULT_PROVIDER_ID, OPENCODE_PROVIDER_ID)
 DEFAULT_PROVIDER_BACKEND = "acp"
 ALLOWED_PROVIDER_BACKENDS = ("acp", "legacy_cli")
 DEFAULT_ADAPTER_COMMAND = "python3"
 DEFAULT_ADAPTER_ARGS = ["-m", "perlica.providers.acp_adapter_server"]
+OPENCODE_ADAPTER_COMMAND = "opencode"
+OPENCODE_ADAPTER_ARGS = ["acp"]
 
 
 @dataclass(frozen=True)
@@ -35,5 +38,13 @@ class ProviderProfile:
 def default_provider_profiles() -> Dict[str, ProviderProfile]:
     """Return default provider profile map for project bootstrap."""
 
-    profile = ProviderProfile(provider_id=DEFAULT_PROVIDER_ID)
-    return {profile.provider_id: profile}
+    claude_profile = ProviderProfile(provider_id=DEFAULT_PROVIDER_ID)
+    opencode_profile = ProviderProfile(
+        provider_id=OPENCODE_PROVIDER_ID,
+        adapter_command=OPENCODE_ADAPTER_COMMAND,
+        adapter_args=list(OPENCODE_ADAPTER_ARGS),
+    )
+    return {
+        claude_profile.provider_id: claude_profile,
+        opencode_profile.provider_id: opencode_profile,
+    }

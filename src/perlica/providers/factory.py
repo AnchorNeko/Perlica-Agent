@@ -8,7 +8,7 @@ from perlica.providers.acp_provider import ACPProvider
 from perlica.providers.acp_types import ACPClientConfig
 from perlica.providers.base import BaseProvider, ProviderInteractionHandler
 from perlica.providers.claude_cli import ClaudeCLIProvider
-from perlica.providers.profile import ProviderProfile
+from perlica.providers.profile import ALLOWED_PROVIDER_IDS, DEFAULT_PROVIDER_ID, ProviderProfile
 
 ProviderEventEmitter = Callable[[str, Dict[str, object], Dict[str, object]], None]
 
@@ -29,10 +29,14 @@ class ProviderFactory:
 
     def build(self, profile: ProviderProfile) -> BaseProvider:
         provider_id = str(profile.provider_id or "").strip().lower()
-        if provider_id != "claude":
+        if provider_id not in ALLOWED_PROVIDER_IDS:
             raise ValueError("unsupported provider profile: {0}".format(provider_id or "<empty>"))
 
         if profile.backend == "legacy_cli":
+            if provider_id != DEFAULT_PROVIDER_ID:
+                raise ValueError(
+                    "legacy_cli backend is not supported for provider '{0}'".format(provider_id)
+                )
             return ClaudeCLIProvider(
                 interaction_handler=self._interaction_handler,
                 interaction_resolver=self._interaction_resolver,
@@ -49,14 +53,16 @@ class ProviderFactory:
             circuit_breaker_enabled=bool(profile.acp_circuit_breaker_enabled),
         )
 
-        fallback_provider = (
-            ClaudeCLIProvider(
+        fallback_provider = None
+        if profile.fallback_enabled:
+            if provider_id != DEFAULT_PROVIDER_ID:
+                raise ValueError(
+                    "fallback is only supported for provider '{0}'".format(DEFAULT_PROVIDER_ID)
+                )
+            fallback_provider = ClaudeCLIProvider(
                 interaction_handler=self._interaction_handler,
                 interaction_resolver=self._interaction_resolver,
             )
-            if profile.fallback_enabled
-            else None
-        )
         return ACPProvider(
             provider_id=provider_id,
             acp_config=acp_config,

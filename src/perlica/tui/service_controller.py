@@ -40,7 +40,10 @@ class ServiceController:
         normalized_provider = str(provider or "").strip().lower()
         if normalized_provider not in ALLOWED_PROVIDERS:
             raise ValueError(
-                "service supports provider=claude only, got: {0}".format(provider)
+                "service supports provider in [{0}], got: {1}".format(
+                    "|".join(ALLOWED_PROVIDERS),
+                    provider,
+                )
             )
         self._settings = load_settings(context_id=context_id, provider=normalized_provider)
         self._runtime = Runtime(self._settings)
@@ -123,6 +126,23 @@ class ServiceController:
     def active_channel_id(self) -> str:
         return self._active_channel_id or ""
 
+    def _default_channel_id_example(self) -> str:
+        for registration in list_channel_registrations():
+            channel_id = str(registration.channel_id or "").strip().lower()
+            if channel_id:
+                return channel_id
+        return ""
+
+    def _inactive_channel_notice(self, *, level: str, zh_prefix: str, en_prefix: str) -> str:
+        command = "/service channel use <channel_id>"
+        zh = "{0}请先执行 `{1}`。".format(zh_prefix, command)
+        en = "{0}Run `{1}` first.".format(en_prefix, command)
+        example_channel = self._default_channel_id_example()
+        if example_channel:
+            zh = "{0} 例如 `/service channel use {1}`。".format(zh, example_channel)
+            en = "{0} Example: `/service channel use {1}`.".format(en, example_channel)
+        return render_notice(level, zh, en)
+
     def submit_input(self, raw: str) -> str:
         text = str(raw or "").strip("\n")
         if not text.strip():
@@ -137,17 +157,17 @@ class ServiceController:
                 dispatch, output = execute_slash_command_to_text(text, self._command_state())
                 if dispatch.handled:
                     return output
-                return render_notice(
-                    "warn",
-                    "尚未激活渠道，请先执行 `/service channel use imessage`。",
-                    "No active channel. Run `/service channel use imessage` first.",
+                return self._inactive_channel_notice(
+                    level="warn",
+                    zh_prefix="尚未激活渠道，",
+                    en_prefix="No active channel. ",
                 )
             return self._orchestrator.execute_local_command(text)
         if self._orchestrator is None:
-            return render_notice(
-                "warn",
-                "尚未激活渠道，请先执行 `/service channel use imessage`。",
-                "No active channel. Run `/service channel use imessage` first.",
+            return self._inactive_channel_notice(
+                level="warn",
+                zh_prefix="尚未激活渠道，",
+                en_prefix="No active channel. ",
             )
         if self._orchestrator.has_pending_interaction():
             return self._orchestrator.submit_interaction_answer(text, source="local")
@@ -180,6 +200,29 @@ class ServiceController:
         if self._orchestrator is None:
             return "当前无待确认交互。"
         return self._orchestrator.pending_interaction_text()
+
+    def busy_reject_message(self) -> str:
+        message = self._runtime.task_coordinator.reject_new_command_if_busy()
+        if message:
+            return message
+        return "上一条指令仍在执行中，请稍后再试。"
+
+    def emit_task_command_rejected(self, *, source: str, text: str) -> None:
+        snapshot = self._runtime.task_coordinator.snapshot()
+        conversation_id = snapshot.conversation_id or "cli.{0}".format(self._runtime.context_id)
+        self._runtime.emit(
+            "task.command.rejected",
+            {
+                "source": source,
+                "reason": "busy_running_task",
+                "state": snapshot.state.value,
+                "run_id": snapshot.run_id,
+                "input_preview": str(text or "")[:120],
+            },
+            conversation_id=conversation_id,
+            actor="service_tui",
+            run_id=snapshot.run_id or None,
+        )
 
     def _forward_event(self, event: ServiceEvent) -> None:
         if self._event_sink is not None:
@@ -250,28 +293,28 @@ class ServiceController:
 
     def _service_status(self) -> str:
         if self._orchestrator is None:
-            return render_notice(
-                "info",
-                "当前尚未激活渠道，请先执行 `/service channel use imessage`。",
-                "No active channel. Run `/service channel use imessage` first.",
+            return self._inactive_channel_notice(
+                level="info",
+                zh_prefix="当前尚未激活渠道，",
+                en_prefix="No active channel. ",
             )
         return self._orchestrator.status_text()
 
     def _service_rebind(self) -> str:
         if self._orchestrator is None:
-            return render_notice(
-                "warn",
-                "当前未激活渠道，无法重绑。请先执行 `/service channel use imessage`。",
-                "No active channel. Use `/service channel use imessage` first.",
+            return self._inactive_channel_notice(
+                level="warn",
+                zh_prefix="当前未激活渠道，无法重绑。",
+                en_prefix="No active channel. Unable to rebind. ",
             )
         return self._orchestrator.rebind()
 
     def _service_unpair(self) -> str:
         if self._orchestrator is None:
-            return render_notice(
-                "warn",
-                "当前未激活渠道，无法解除配对。请先执行 `/service channel use imessage`。",
-                "No active channel. Use `/service channel use imessage` first.",
+            return self._inactive_channel_notice(
+                level="warn",
+                zh_prefix="当前未激活渠道，无法解除配对。",
+                en_prefix="No active channel. Unable to unpair. ",
             )
         return self._orchestrator.unpair()
 
@@ -303,10 +346,11 @@ class ServiceController:
     def _service_channel_use(self, channel_id: str) -> str:
         normalized = str(channel_id or "").strip().lower()
         if not normalized:
+            example = self._default_channel_id_example()
             return render_notice(
                 "error",
-                "请提供渠道 ID，例如 `imessage`。",
-                "Channel id is required, e.g. `imessage`.",
+                "请提供渠道 ID，例如 `{0}`。".format(example or "<channel_id>"),
+                "Channel id is required, e.g. `{0}`.".format(example or "<channel_id>"),
             )
         try:
             message = self.activate_channel(normalized)

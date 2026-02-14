@@ -21,6 +21,7 @@ Perlica 当前按“单轮代理器（One Question, One Provider Call）”运�
 5. 禁止引入隐式摘要模型调用。
 6. `session/prompt` 不做 Perlica 本地硬超时；只要 Claude/ACP 进程仍在运行，就持续等待最终结果。
 7. 非 `session/prompt` 方法允许超时保护（如 `initialize/session/new/session/close`）。
+8. provider 文本回退仅允许“用户可见回复字段”白名单；禁止输出 thought/推理片段。
 
 ## Debug 规则（Log-First）
 

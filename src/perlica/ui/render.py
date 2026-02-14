@@ -143,6 +143,16 @@ def render_doctor_text(report: Dict[str, Any]) -> str:
     providers = report.get("providers")
     if not isinstance(providers, dict):
         providers = {}
+    provider_lines = []
+    for provider_id in sorted(str(key) for key in providers.keys()):
+        provider_lines.append(
+            "{0}={1}".format(
+                provider_id,
+                "ok" if providers.get(provider_id) else "missing",
+            )
+        )
+    if not provider_lines:
+        provider_lines = ["claude=missing", "opencode=missing"]
 
     lines = [
         bilingual_text("系统诊断", "Doctor Report"),
@@ -150,7 +160,7 @@ def render_doctor_text(report: Dict[str, Any]) -> str:
         "context_dir={0}".format(report.get("context_dir", "")),
         "",
         bilingual_text("Provider 可用性", "Provider Availability"),
-        "claude={0}".format("ok" if providers.get("claude") else "missing"),
+        *provider_lines,
         "active_provider={0}".format(str(report.get("active_provider") or "")),
         "adapter_probe={0}".format(str(report.get("provider_adapter_probe") or "")),
         "",
@@ -300,7 +310,7 @@ def render_repl_help_summary() -> str:
         "/exit | /quit",
         "/save [name]",
         "/discard",
-        "/session [list [--all]|new [--name NAME] [--provider claude]|use <ref>|current]",
+        "/session [list [--all]|new [--name NAME] [--provider <provider_id>]|use <ref>|current]",
         "/doctor [--format json|text] [--verbose]",
         "/mcp [list|reload|status]",
         "/skill [list|reload]",

@@ -34,3 +34,18 @@ def test_chat_controller_submits_pending_interaction_answer(isolated_env):
         assert controller.has_pending_interaction() is False
     finally:
         controller.close()
+
+
+def test_chat_controller_busy_reject_message_when_task_running(isolated_env):
+    controller = ChatController(provider="claude", yes=True, context_id="default")
+    try:
+        started = controller._runtime.task_coordinator.start_task(
+            run_id="run_busy",
+            conversation_id="session.busy",
+            session_id=str(controller.state.session_ref or ""),
+        )
+        assert started is True
+        text = controller.busy_reject_message()
+        assert "执行中" in text or "等待确认" in text
+    finally:
+        controller.close()

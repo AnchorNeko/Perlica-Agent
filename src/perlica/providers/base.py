@@ -79,7 +79,11 @@ class BaseProvider(ABC):
 
 
 class ProviderInteractionHandler(Protocol):
-    """Sync callback used by providers to resolve interactive confirmations."""
+    """Sync callback used by providers to resolve interactive confirmations.
+
+    The callback executes inside one active task/run. Provider asks and user
+    replies are sub-stages of the same task, not separate commands.
+    """
 
     def __call__(self, request: "InteractionRequest") -> "InteractionAnswer":
         ...

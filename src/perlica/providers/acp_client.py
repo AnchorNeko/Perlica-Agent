@@ -567,6 +567,21 @@ class ACPClient:
 
         notification_rows = list(notifications or [])
         assistant_text = self._collect_assistant_text(notification_rows)
+        fallback_source = ""
+        if not assistant_text:
+            assistant_text, fallback_source = self._collect_visible_text_fallback(
+                payload=payload,
+                notifications=notification_rows,
+            )
+            if assistant_text:
+                self._emit(
+                    "acp.response.fallback_text_used",
+                    {
+                        "provider_id": self._provider_id,
+                        "source": fallback_source,
+                        "chars": len(assistant_text),
+                    },
+                )
         tool_calls = coerce_tool_calls(self._collect_tool_calls(notification_rows))
         usage_payload = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         usage = self._normalize_usage_payload(usage_payload)
@@ -710,6 +725,14 @@ class ACPClient:
 
     @staticmethod
     def _collect_assistant_text(notifications: List[Dict[str, Any]]) -> str:
+        allowed_updates = {
+            "agent_message_chunk",
+            "agent_message",
+            "assistant_message_chunk",
+            "assistant_message",
+            "message_chunk",
+            "message",
+        }
         parts: List[str] = []
         for row in notifications:
             if not isinstance(row, dict):
@@ -721,19 +744,96 @@ class ACPClient:
             if not isinstance(update, dict):
                 continue
             update_type = str(update.get("sessionUpdate") or update.get("session_update") or "").strip()
-            if update_type != "agent_message_chunk":
+            if update_type not in allowed_updates:
                 continue
             content = update.get("content")
-            if isinstance(content, dict):
-                if str(content.get("type") or "").strip() != "text":
-                    continue
-                text = str(content.get("text") or "")
+            text = ACPClient._extract_text_from_content_value(content)
+            if text:
+                parts.append(text)
+                continue
+            alt_text = str(update.get("text") or "").strip()
+            if alt_text:
+                parts.append(alt_text)
+        return "".join(parts).strip()
+
+    @staticmethod
+    def _collect_visible_text_fallback(
+        *,
+        payload: Dict[str, Any],
+        notifications: List[Dict[str, Any]],
+    ) -> Tuple[str, str]:
+        text = ACPClient._extract_text_from_result_payload(payload)
+        if text:
+            return text, "result_payload"
+        text = ACPClient._collect_visible_text_from_notifications(notifications)
+        if text:
+            return text, "notification_fallback"
+        return "", ""
+
+    @staticmethod
+    def _extract_text_from_result_payload(payload: Dict[str, Any]) -> str:
+        for key in ("assistant_text", "message", "output_text", "text", "result"):
+            value = payload.get(key)
+            text = ACPClient._extract_text_from_content_value(value)
+            if text:
+                return text
+        content = payload.get("content")
+        text = ACPClient._extract_text_from_content_value(content)
+        if text:
+            return text
+        return ""
+
+    @staticmethod
+    def _collect_visible_text_from_notifications(notifications: List[Dict[str, Any]]) -> str:
+        parts: List[str] = []
+        for row in notifications:
+            if not isinstance(row, dict):
+                continue
+            params = row.get("params")
+            if not isinstance(params, dict):
+                continue
+            update = params.get("update")
+            if not isinstance(update, dict):
+                continue
+            update_type = str(update.get("sessionUpdate") or update.get("session_update") or "").strip().lower()
+            if "thought" in update_type:
+                continue
+            if "message" not in update_type:
+                continue
+            text = ACPClient._extract_text_from_content_value(update.get("content"))
+            if text:
+                parts.append(text)
+                continue
+            alt_text = str(update.get("text") or "").strip()
+            if alt_text:
+                parts.append(alt_text)
+        return "".join(parts).strip()
+
+    @staticmethod
+    def _extract_text_from_content_value(value: Any) -> str:
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, dict):
+            value_type = str(value.get("type") or "").strip().lower()
+            if value_type and value_type != "text":
+                return ""
+            text = value.get("text")
+            if isinstance(text, str):
+                return text.strip()
+            for key in ("message", "content", "result"):
+                nested = value.get(key)
+                nested_text = ACPClient._extract_text_from_content_value(nested)
+                if nested_text:
+                    return nested_text
+            return ""
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                text = ACPClient._extract_text_from_content_value(item)
                 if text:
                     parts.append(text)
-                continue
-            if isinstance(content, str) and content:
-                parts.append(content)
-        return "".join(parts).strip()
+            return "".join(parts).strip()
+        return ""
 
     @staticmethod
     def _collect_tool_calls(notifications: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -770,13 +870,14 @@ class ACPClient:
     @staticmethod
     def _normalize_usage_payload(usage_payload: Dict[str, Any]) -> Dict[str, Any]:
         return {
-            "input_tokens": int(usage_payload.get("input_tokens") or 0),
+            "input_tokens": int(usage_payload.get("input_tokens") or usage_payload.get("inputTokens") or 0),
             "cached_input_tokens": int(
                 usage_payload.get("cached_input_tokens")
                 or usage_payload.get("cache_read_input_tokens")
+                or usage_payload.get("cachedReadTokens")
                 or 0
             ),
-            "output_tokens": int(usage_payload.get("output_tokens") or 0),
+            "output_tokens": int(usage_payload.get("output_tokens") or usage_payload.get("outputTokens") or 0),
             "context_window": int(usage_payload.get("context_window") or 0),
             "raw_usage": dict(usage_payload),
         }

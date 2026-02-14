@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable, Deque, Dict, Iterable, List, Optional
 
 from perlica.providers.acp_types import ACPClientConfig
@@ -277,6 +278,20 @@ class StdioACPTransport:
         # Keep base env for stable Python/module startup; allowlist can be
         # used by config governance and future strict filtering.
         env = dict(os.environ)
+        # Ensure adapter subprocess can import local `perlica` package even
+        # when current working directory is outside repository root.
+        try:
+            src_root = Path(__file__).resolve().parents[2]
+            if (src_root / "perlica").is_dir():
+                src_text = str(src_root)
+                current = str(env.get("PYTHONPATH") or "")
+                parts = [item for item in current.split(os.pathsep) if item]
+                if src_text not in parts:
+                    env["PYTHONPATH"] = (
+                        os.pathsep.join([src_text] + parts) if parts else src_text
+                    )
+        except Exception:
+            pass
         if self._config.env_allowlist:
             for key in self._config.env_allowlist:
                 if key in os.environ:

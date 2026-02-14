@@ -244,7 +244,7 @@ def test_stop_listener_without_active_watch_emits_no_stopped_telemetry():
     assert not any(item.event_type == "listener.stopped" for item in events)
 
 
-def test_poll_recent_messages_allows_choose_from_me_in_bound_chat_with_mismatched_sender(monkeypatch):
+def test_poll_recent_messages_filters_choose_from_me_with_mismatched_sender(monkeypatch):
     adapter = IMessageChannelAdapter()
 
     monkeypatch.setattr(
@@ -276,12 +276,10 @@ def test_poll_recent_messages_allows_choose_from_me_in_bound_chat_with_mismatche
         max_chats=2,
         limit_per_chat=8,
     )
-    assert len(messages) == 1
-    assert messages[0].text == "/choose 1"
-    assert messages[0].is_from_me is True
+    assert messages == []
 
 
-def test_poll_recent_messages_still_filters_non_command_from_me_mismatch(monkeypatch):
+def test_poll_recent_messages_filters_non_command_from_me_mismatch(monkeypatch):
     adapter = IMessageChannelAdapter()
 
     monkeypatch.setattr(

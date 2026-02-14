@@ -31,7 +31,7 @@ def test_model_command_removed_direct_path(isolated_env):
     assert result.handled is True
     output = stream.getvalue()
     assert "命令 `/model` 已移除" in output
-    assert "默认模型为 claude" in output
+    assert "默认 provider 由配置决定" in output
 
 
 def test_model_command_removed_menu_path(isolated_env):

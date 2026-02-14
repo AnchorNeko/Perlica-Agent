@@ -1,0 +1,13 @@
+# macOS / editor
+.DS_Store
+
+# Python cache artifacts
+__pycache__/
+*.py[cod]
+
+# Pytest cache
+.pytest_cache/
+
+# Perlica runtime state artifacts
+.perlica_config/contexts/*/*.db
+.perlica_config/contexts/*/logs/debug.log.jsonl
