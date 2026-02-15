@@ -13,7 +13,7 @@ service 行为变更必须文档先行（常规强制）。
 1. service debug 优先查看 `debug.log.jsonl` 中 `service_event/telemetry`，并结合 TUI status 字段（`queue/busy/listen`）。  
 2. 以日志里的 `contact/chat/session/event_id/event_type` 为依据定位 `orchestrator` 与 `channel` 路径。  
 3. 改动 ACK/队列/绑定逻辑时，必须补可观测日志，确保后续可复盘“先 ACK、后串行回复”的时序。
-4. 若用户反馈“Claude 卡住/超时”，先查同 run 是否持续出现 `acp.notification.received(stage=session/prompt)`；有则视为仍在运行，不应被本地 prompt timeout 误判。
+4. 若用户反馈“Claude 卡住/超时”，先查同 run 是否持续出现 `provider.acp.notification.received(stage=session/prompt)`；有则视为仍在运行，不应被本地 prompt timeout 误判。
 
 ## 允许改动
 

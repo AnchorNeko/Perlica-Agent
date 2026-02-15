@@ -104,6 +104,7 @@ Interactive and service mode share the same slash command layer.
 - `/session new --name demo`
 - `/session use <session_ref>`
 - `/session current`
+- `/session delete <session_ref>`
 - `/doctor --format text`
 - `/mcp list`
 - `/mcp reload`
@@ -118,6 +119,8 @@ Interactive and service mode share the same slash command layer.
   Unknown slash commands fall back to model input.
 - `/clear` 只清空当前会话消息与摘要，不删除会话本身。  
   `/clear` clears messages/summaries only, keeping the session record.
+- `/session delete <session_ref>` 仅允许删除“非当前会话”；当前会话会被拒绝删除。
+  `/session delete <session_ref>` only deletes non-current sessions; deleting current session is rejected.
 - 当模型发起交互确认时，`/pending` 可查看当前待确认问题。  
   When model asks for interaction confirmation, `/pending` shows the active pending request.
 - `/choose 1` 选择第 1 个选项，`/choose 任意文本` 提交自定义回答。  
@@ -181,7 +184,7 @@ perlica run "分析这个报错" --context default
 echo "你好，帮我总结日志" | perlica
 ```
 
-## Prompt / Provider 配置注入顺序（Prompt + Provider Config Injection Order）
+## Prompt 注入顺序与 Provider 启动静态同步（Prompt Order + Startup Static Sync）
 
 每轮请求的消息注入顺序如下：  
 Each run injects message context in this order:
@@ -191,16 +194,27 @@ Each run injects message context in this order:
    Session history (deterministic truncation only; no model summary call)
 3. 当前用户输入（current user input）
 
-provider 配置注入（非 message 注入）：
+Provider 静态同步（启动阶段，非 message 注入）：
 
-1. Skill 选择仍执行，但不再把 skill prompt 拼进 `messages`。  
-   Skill selection still runs, but selected skills are no longer injected into `messages`.
-2. MCP resources/prompts 也不再拼接成 message 文本块。  
-   MCP resources/prompts are no longer injected as message text blocks.
-3. Runner 在调用 provider 时，把 `mcp/skill` 注入 `context.provider_config`，并由 provider 按能力消费。  
-   Runner injects `mcp/skill` into `context.provider_config` and provider consumes them by capability.
-4. `LLMRequest.tools` 在 Runner 调用链路固定传空数组，避免诱导 provider 返回本地可执行 tool loop。  
+1. `run/chat/service` 启动时会先对“当前 provider”执行静态配置同步（MCP + Skills），再创建 Runtime。  
+   `run/chat/service` first performs startup static sync (MCP + Skills) for the active provider before Runtime creation.
+2. 同步来源固定为：
+   - MCP：`.perlica_config/mcp/servers.toml` 中 `enabled=true` 项  
+   - Skills：`SkillLoader(settings.skill_dirs).load().skills` 全量已加载项
+3. 策略固定为 `project-first`：优先写项目级配置，必要时回退用户级配置。  
+   Strategy is fixed to `project-first` with user-level fallback when needed.
+4. 仅管理 Perlica 命名空间，并做过期清理：
+   - MCP key：`perlica.<server_id>`
+   - Skill 目录：`perlica-<skill-id>`
+5. provider-specific 静态路径：
+   - `claude`：项目级 `<workspace>/.mcp.json` + `<workspace>/.claude/skills`；用户级 `~/.claude/settings.json` + `~/.claude/skills`
+   - `opencode`：项目级 `<workspace>/opencode.json` + `<workspace>/.opencode/skills`；用户级 `~/.config/opencode/opencode.json` + `~/.config/opencode/skills`
+6. `LLMRequest.tools` 在 Runner 调用链路固定传空数组，避免诱导 provider 返回本地可执行 tool loop。  
    `LLMRequest.tools` is always an empty array from Runner to avoid local tool-loop coupling.
+7. `mcp/skill` 不再由 Runner 注入到 `context.provider_config`；`provider_config` 仅保留运行时策略字段。  
+   Runner no longer injects `mcp/skill` into `context.provider_config`; it keeps runtime policy fields only.
+8. trigger 匹配仍会产生日志事件（`skill.selected/skill.skipped`），仅用于诊断。  
+   Trigger matching still emits `skill.selected/skill.skipped` for diagnostics only.
 
 关键行为（Key behavior）：
 
@@ -210,6 +224,23 @@ provider 配置注入（非 message 注入）：
   When context is over budget, Runner truncates deterministically and emits `context.truncated`.
 - provider 若仍返回 `tool_calls`，Perlica 仅记录 `tool.blocked/tool.result`，不会本地执行。  
   If provider still returns `tool_calls`, Perlica records blocked evidence only and never dispatches locally.
+
+### 内置 AppleScript Skill（Built-in AppleScript Skill）
+
+- 文件位置：`.perlica_config/skills/macos-applescript-operator.skill.json`  
+  File location: `.perlica_config/skills/macos-applescript-operator.skill.json`
+- 目标：提升 GUI/App 自动化任务的 AppleScript 执行质量与稳定性。  
+  Goal: improve AppleScript execution quality and stability for GUI/app automation tasks.
+- 同步方式：在 provider 支持 `supports_skill_config=true` 时，启动阶段会将该 skill 同步到 provider 的静态 skills 目录，无需等待触发词命中。  
+  Sync mode: when `supports_skill_config=true`, this skill is synced to provider static skills at startup without waiting for trigger hits.
+- 典型触发词：`AppleScript`、`osascript`、`gui`、`finder`、`safari`、`系统设置`、`打开应用`、`点击菜单`。  
+  Typical triggers: `AppleScript`, `osascript`, `gui`, `finder`, `safari`, `system settings`, app open/click menu intents.
+- 使用建议：在用户指令中明确动作和目标应用，例如“请用 AppleScript 打开 Safari 并点击书签栏第一个项目”。  
+  Usage tip: include explicit action + target app, e.g. "use AppleScript to open Safari and click ...".
+- 更易触发建议：在提示词显式包含 `AppleScript` / `osascript` / `点击菜单` / `打开应用` 等词。  
+  Triggering tip: explicitly include words like `AppleScript` / `osascript` / `click menu` / `open app`.
+- 失败诊断：执行 `/doctor --format text`，检查 `permissions.applescript`。  
+  Failure diagnosis: run `/doctor --format text` and check `permissions.applescript`.
 
 ### 电脑管家 Prompt 策略（macOS Steward Prompt Policy）
 
@@ -261,6 +292,12 @@ enabled = true
 Perlica 当前支持 `claude` 与 `opencode` 两个 provider，二者都走 ACP 主通路。  
 Perlica supports both `claude` and `opencode`, both via ACP-first path.
 
+当前 provider 分层（As-Built）：
+
+- `ClaudeACPProvider` + `Claude ACP codec`
+- `OpenCodeACPProvider` + `OpenCode ACP codec`
+- `ACPClient` 仅负责生命周期编排与协议收发，不感知 provider 方言差异。
+
 默认 adapter（Default adapters）：
 
 - `claude`: `command = "python3"`, `args = ["-m", "perlica.providers.acp_adapter_server"]`
@@ -276,7 +313,6 @@ provider_selected = false # init defaults to false, becomes true after first sel
 
 [providers.claude]
 enabled = true
-backend = "acp" # acp | legacy_cli
 
 [providers.claude.adapter]
 command = "python3"
@@ -290,9 +326,6 @@ max_retries = 2 # deprecated/no-op in single-call mode
 backoff = "exponential+jitter"
 circuit_breaker_enabled = true
 
-[providers.claude.fallback]
-enabled = false
-
 [providers.claude.capabilities]
 supports_mcp_config = true
 supports_skill_config = true
@@ -301,7 +334,6 @@ injection_failure_policy = "degrade"
 
 [providers.opencode]
 enabled = true
-backend = "acp" # acp only
 
 [providers.opencode.adapter]
 command = "opencode"
@@ -315,15 +347,17 @@ max_retries = 2 # deprecated/no-op in single-call mode
 backoff = "exponential+jitter"
 circuit_breaker_enabled = true
 
-[providers.opencode.fallback]
-enabled = false
-
 [providers.opencode.capabilities]
 supports_mcp_config = true
 supports_skill_config = true
 tool_execution_mode = "provider_managed"
 injection_failure_policy = "degrade"
 ```
+
+能力字段语义（As-Built）：
+
+- `supports_mcp_config` / `supports_skill_config` 用于“是否支持启动静态同步矩阵”，不再表示 Runner 运行时注入。  
+  `supports_mcp_config` / `supports_skill_config` indicate startup static-sync support matrix, not runtime Runner injection.
 
 可选：若你明确希望使用外部 `cc-acp`，可覆盖为：  
 Optional: if you explicitly want external `cc-acp`, override as:
@@ -334,20 +368,11 @@ command = "cc-acp"
 args = []
 ```
 
-### Break-Glass（紧急降级到 legacy_cli）
+配置迁移规则（Breaking change）：
 
-默认情况下，ACP transport/protocol 失败不会自动回退。  
-By default, ACP transport/protocol failures do not auto-fallback.
-
-只有显式设置以下环境变量时，才允许临时启用回退：
-Fallback is allowed only when this env var is explicitly enabled:
-
-```bash
-PERLICA_PROVIDER_BREAK_GLASS=1 perlica run "..."
-```
-
-触发回退会写审计事件：`provider.fallback_activated`。  
-Fallback activation emits audit event `provider.fallback_activated`.
+1. `providers.<id>.backend` 已移除。
+2. `providers.<id>.fallback` 已移除。
+3. 旧配置若仍包含以上字段，启动将直接失败并提示迁移。
 
 ### ACP 实战经验（Timeout/卡住排查）
 
@@ -356,11 +381,11 @@ The following stability lessons are already applied in current As-Built.
 
 1. 内置 ACP adapter 调 Claude CLI 时，必须显式 `stdin=DEVNULL`。  
    If Claude inherits ACP stdin pipe, `session/prompt` may block and eventually timeout.
-2. OpenCode ACP 返回 `sessionId` + `prompt` 语义，Perlica ACPClient 已兼容该官方参数形态。  
-   OpenCode ACP (`sessionId` + `prompt`) is supported by ACPClient.
+2. OpenCode ACP 返回 `sessionId` + `prompt` 语义，Perlica 由 OpenCode provider codec 负责兼容。
+   OpenCode ACP (`sessionId` + `prompt`) is handled by OpenCode provider codec.
 3. 若你改用外部 ACP server，请先确认认证状态与运行权限；否则可能快速失败。  
-4. 若看到 pending 长时间不结束，先查事件链是否有 `interaction.requested` 但无 `interaction.answered/acp.reply.sent`。  
-   If pending is stuck, check whether `interaction.requested` exists without `interaction.answered/acp.reply.sent`.
+4. 若看到 pending 长时间不结束，先查事件链是否有 `interaction.requested` 但无 `interaction.answered/provider.acp.reply.sent`。
+   If pending is stuck, check whether `interaction.requested` exists without `interaction.answered/provider.acp.reply.sent`.
 
 快速自检（Quick health check）：
 
@@ -372,9 +397,9 @@ PYTHONPATH=src /Users/anchorcat/miniconda3/bin/python -m perlica.cli run "你好
 
 1. 退出码为 0（exit code 0）。
 2. 助手回复非空。
-3. 事件日志包含 `acp.session.started` 与 `acp.session.closed`。
-4. 同一 run 不出现 `acp.request.timeout` 与 `llm.provider_error`。
-5. 若出现交互确认，日志中可看到 `interaction.requested -> interaction.answered -> acp.reply.sent -> interaction.resolved`。
+3. 事件日志包含 `provider.acp.session.started` 与 `provider.acp.session.closed`。
+4. 同一 run 不出现 `provider.acp.request.timeout` 与 `llm.provider_error`。
+5. 若出现交互确认，日志中可看到 `interaction.requested -> interaction.answered -> provider.acp.reply.sent -> interaction.resolved`。
 6. 排查交互并发/误答时，优先按 `run_id/trace_id/conversation_id/session_id/interaction_id` 五元组过滤日志。
 
 可选日志核验（Optional event-log verification）：
@@ -383,7 +408,7 @@ PYTHONPATH=src /Users/anchorcat/miniconda3/bin/python -m perlica.cli run "你好
 sqlite3 .perlica_config/contexts/default/eventlog.db \
   "with latest as (select run_id from event_log where event_type='inbound.message.received' order by rowid desc limit 1) \
    select e.run_id,e.event_type,e.ts_ms from event_log e join latest l on e.run_id=l.run_id \
-   where e.event_type in ('acp.session.started','acp.session.closed','acp.request.timeout','llm.provider_error') \
+   where e.event_type in ('provider.acp.session.started','provider.acp.session.closed','provider.acp.request.timeout','llm.provider_error') \
    order by e.rowid;"
 ```
 
@@ -459,7 +484,6 @@ To reduce self-loop message echoes, use these settings:
 `perlica doctor --format text` / `perlica doctor --format json` 会包含 ACP 相关字段：  
 Doctor includes ACP status fields:
 
-- `provider_backend`
 - `acp_adapter_status`
 - `acp_session_errors`
 
@@ -494,12 +518,12 @@ perlica session new --name demo
   Provider `tool_calls` are recorded for observability only and are not executed locally by Perlica.
 - 当响应包含 `tool_calls` 时，Runner 会发 `tool.blocked(reason=single_call_mode_local_tool_dispatch_disabled)` 与对应 `tool.result(ok=false)`。  
   When `tool_calls` exist, Runner emits `tool.blocked(reason=single_call_mode_local_tool_dispatch_disabled)` and matching `tool.result(ok=false)`.
-- `mcp/skill` 仅在 provider 调用前按 capability 注入 `context.provider_config`；不再以 system message 形式注入。  
-  `mcp/skill` are injected only via `context.provider_config` gated by provider capabilities, not system messages.
-- 对支持 MCP 配置注入的 provider，`session/new` 会显式携带 `mcpServers` 数组；未配置服务器时也传空数组 `[]`，避免 `undefined` 触发参数校验失败。  
-  For providers that support MCP config injection, `session/new` explicitly includes an `mcpServers` array; when no servers are configured, it sends `[]` to avoid validation failures caused by `undefined`.
-- 若 provider 拒绝 `session/new` 注入字段，ACPClient 会自动降级（先去掉 `skills`，再去掉 `mcpServers`）并继续；降级过程有结构化事件。  
-  If provider rejects `session/new` injection fields, ACPClient auto-degrades (drop `skills`, then `mcpServers`) with structured events.
+- `mcp/skill` 改为启动阶段静态同步到 provider 配置文件，不再由 Runner 注入 `context.provider_config`。  
+  `mcp/skill` now uses startup static file sync and is no longer injected by Runner into `context.provider_config`.
+- `session/new` 默认不再发送 `skills`；`mcpServers` 也不再作为注入载荷使用。  
+  `session/new` no longer sends `skills` by default, and `mcpServers` is no longer used as an injection payload.
+- 为兼容当前 opencode ACP 参数校验，`session/new` 会保留 `mcpServers=[]` 的空数组字段（仅协议兼容，不承载 Perlica 配置注入）。  
+  For current opencode ACP parameter validation compatibility, `session/new` keeps `mcpServers=[]` (protocol compatibility only, not Perlica config injection).
 - Claude 若返回诊断信息但无 assistant 文本，Perlica不会追加第二次模型请求；诊断会作为本轮可见输出或结构化错误上报。  
   If Claude returns diagnostics without assistant text, Perlica does not issue a second model call; diagnostics are surfaced directly.
 - 默认内置 adapter 若启动失败，会在 `doctor` 的 `acp_adapter_status` 里给出诊断。  
@@ -568,6 +592,12 @@ Perlica writes structured JSONL debug logs under each context for AI debugging.
       sessions.db
   service/
     service_bridge.db
+```
+
+`/skill list` 示例（新增内置 skill 后）：
+
+```text
+macos-applescript-operator priority=90 triggers=applescript,osascript,gui,finder,safari,chrome,system events,系统设置,打开应用,点击,菜单,窗口,自动化,脚本 source=.perlica_config/skills/macos-applescript-operator.skill.json
 ```
 
 ## 开发协作约束（Development Collaboration Rules）

@@ -16,7 +16,6 @@ def test_load_settings_with_opencode_profile(isolated_env):
     settings = load_settings(context_id="default", workspace_dir=workspace)
     assert settings.provider == "opencode"
     assert settings.provider_profile.provider_id == "opencode"
-    assert settings.provider_profile.backend == "acp"
     assert settings.provider_adapter_command == "opencode"
     assert settings.provider_adapter_args == ["acp"]
     assert settings.provider_profile.supports_mcp_config is True

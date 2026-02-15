@@ -176,7 +176,14 @@ def render_doctor_text(report: Dict[str, Any]) -> str:
         ),
         "system_prompt_loaded={0}".format(bool(report.get("system_prompt_loaded"))),
         "skill_prompt_injection_enabled={0}".format(bool(report.get("skill_prompt_injection_enabled", True))),
-        "provider_backend={0}".format(str(report.get("provider_backend") or "")),
+        "provider_config_injection_enabled={0}".format(
+            bool(report.get("provider_config_injection_enabled", True))
+        ),
+        "provider_static_sync_enabled={0} scope_mode={1} namespace={2}".format(
+            bool(report.get("provider_static_sync_enabled", False)),
+            str(report.get("provider_static_sync_scope_mode") or ""),
+            str(report.get("provider_static_sync_namespace") or ""),
+        ),
         "acp_adapter_status={0} acp_session_errors={1}".format(
             str(report.get("acp_adapter_status") or ""),
             int(report.get("acp_session_errors") or 0),
@@ -310,7 +317,7 @@ def render_repl_help_summary() -> str:
         "/exit | /quit",
         "/save [name]",
         "/discard",
-        "/session [list [--all]|new [--name NAME] [--provider <provider_id>]|use <ref>|current]",
+        "/session [list [--all]|new [--name NAME] [--provider <provider_id>]|use <ref>|current|delete <ref>]",
         "/doctor [--format json|text] [--verbose]",
         "/mcp [list|reload|status]",
         "/skill [list|reload]",

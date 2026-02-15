@@ -16,9 +16,9 @@ class _FakeACPClient:
 
     def generate(self, req):
         if callable(self.event_sink):
-            self.event_sink("acp.session.started", {"provider_id": self.provider_id, "session_id": "s1"})
-            self.event_sink("acp.request.sent", {"provider_id": self.provider_id, "method": "session/prompt"})
-            self.event_sink("acp.session.closed", {"provider_id": self.provider_id, "session_id": "s1"})
+            self.event_sink("provider.acp.session.started", {"provider_id": self.provider_id, "session_id": "s1"})
+            self.event_sink("provider.acp.request.sent", {"provider_id": self.provider_id, "method": "session/prompt"})
+            self.event_sink("provider.acp.session.closed", {"provider_id": self.provider_id, "session_id": "s1"})
         return LLMResponse(assistant_text="acp ok", tool_calls=[], finish_reason="stop")
 
 
@@ -44,7 +44,7 @@ def test_runner_emits_acp_events(monkeypatch, tmp_path: Path):
 
         events = runtime.event_log.list_events(limit=200)
         event_types = [evt.event_type for evt in events]
-        assert "acp.session.started" in event_types
-        assert "acp.session.closed" in event_types
+        assert "provider.acp.session.started" in event_types
+        assert "provider.acp.session.closed" in event_types
     finally:
         runtime.close()

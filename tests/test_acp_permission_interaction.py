@@ -7,6 +7,7 @@ import pytest
 from perlica.interaction.types import InteractionAnswer, InteractionRequest
 from perlica.kernel.types import LLMRequest
 from perlica.providers.acp_client import ACPClient
+from perlica.providers.acp_codec_claude import ClaudeACPCodec
 from perlica.providers.acp_types import ACPClientConfig
 from perlica.providers.base import ProviderProtocolError
 
@@ -128,6 +129,7 @@ def test_acp_client_handles_request_permission_and_replies(monkeypatch):
     client = ACPClient(
         provider_id="claude",
         config=ACPClientConfig(command="python3"),
+        codec=ClaudeACPCodec(),
         event_sink=lambda event_type, payload: events.append(event_type),
         interaction_handler=_interaction_handler,
     )
@@ -138,7 +140,7 @@ def test_acp_client_handles_request_permission_and_replies(monkeypatch):
     assert factory.instance is not None
     methods = [str(item.get("method") or "") for item in factory.instance.requests]
     assert methods == ["initialize", "session/new", "session/prompt", "session/reply", "session/close"]
-    assert "acp.reply.sent" in events
+    assert "provider.acp.reply.sent" in events
     assert "interaction.resolved" in events
 
 
@@ -149,6 +151,7 @@ def test_acp_client_raises_when_interaction_handler_missing(monkeypatch):
     client = ACPClient(
         provider_id="claude",
         config=ACPClientConfig(command="python3"),
+        codec=ClaudeACPCodec(),
         interaction_handler=None,
     )
 

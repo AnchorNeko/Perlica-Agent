@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from perlica.kernel.types import LLMRequest
+from perlica.kernel.types import LLMRequest, LLMResponse
 from perlica.providers.acp_client import ACPClient
+from perlica.providers.acp_codec import ACPCodec
+from perlica.providers.acp_codec_claude import ClaudeACPCodec
+from perlica.providers.acp_codec_opencode import OpenCodeACPCodec
 from perlica.providers.acp_types import ACPClientConfig
 
 
@@ -75,30 +78,12 @@ def test_acp_client_runs_initialize_new_prompt_close(monkeypatch):
     client = ACPClient(
         provider_id="claude",
         config=ACPClientConfig(command="python3"),
+        codec=ClaudeACPCodec(),
         event_sink=lambda event_type, payload: events.append(event_type),
     )
 
     req = _request()
-    req.context["provider_config"] = {
-        "mcp_servers": [
-            {
-                "server_id": "demo",
-                "command": "python3",
-                "args": ["-m", "demo.server"],
-                "env": {"DEMO": "1"},
-            }
-        ],
-        "skills": [
-            {
-                "skill_id": "demo.skill",
-                "name": "Demo Skill",
-                "description": "demo description",
-                "priority": 5,
-                "triggers": ["demo"],
-                "system_prompt": "demo prompt",
-            }
-        ],
-    }
+    req.context["provider_config"] = {"tool_execution_mode": "provider_managed"}
     response = client.generate(req)
 
     assert response.assistant_text == "ok"
@@ -108,19 +93,20 @@ def test_acp_client_runs_initialize_new_prompt_close(monkeypatch):
     assert methods == ["initialize", "session/new", "session/prompt", "session/close"]
     session_new = factory.instance.requests[1].get("params") or {}
     assert isinstance(session_new, dict)
-    assert isinstance(session_new.get("mcpServers"), list)
-    assert isinstance(session_new.get("skills"), list)
-    assert "acp.session.started" in events
-    assert "acp.session.closed" in events
+    assert "mcpServers" not in session_new
+    assert "skills" not in session_new
+    assert "provider.acp.session.started" in events
+    assert "provider.acp.session.closed" in events
 
 
-def test_acp_client_session_new_includes_empty_mcp_servers_when_declared(monkeypatch):
+def test_claude_session_new_does_not_include_mcp_servers_even_when_declared(monkeypatch):
     factory = _FakeTransportFactory()
     monkeypatch.setattr("perlica.providers.acp_client.StdioACPTransport", factory)
 
     client = ACPClient(
         provider_id="claude",
         config=ACPClientConfig(command="python3"),
+        codec=ClaudeACPCodec(),
     )
 
     req = _request()
@@ -133,103 +119,31 @@ def test_acp_client_session_new_includes_empty_mcp_servers_when_declared(monkeyp
     assert factory.instance is not None
     session_new = factory.instance.requests[1].get("params") or {}
     assert isinstance(session_new, dict)
-    assert "mcpServers" in session_new
-    assert session_new.get("mcpServers") == []
+    assert "mcpServers" not in session_new
 
 
-class _SessionNewRejectTransport:
-    def __init__(self, config: ACPClientConfig, event_sink=None) -> None:
-        del config
-        self.event_sink = event_sink
-        self.requests: List[Dict[str, Any]] = []
+def test_opencode_session_new_includes_empty_mcp_servers_even_without_runtime_injection(monkeypatch):
+    factory = _FakeTransportFactory()
+    monkeypatch.setattr("perlica.providers.acp_client.StdioACPTransport", factory)
 
-    def request(
-        self,
-        payload: Dict[str, Any],
-        timeout_sec: int,
-        notification_sink=None,
-        notification_handler=None,
-        side_response_sink=None,
-    ) -> Dict[str, Any]:
-        del timeout_sec, notification_sink, notification_handler, side_response_sink
-        self.requests.append(payload)
-        method = str(payload.get("method") or "")
-        request_id = str(payload.get("id") or "")
-        if method == "initialize":
-            return {"jsonrpc": "2.0", "id": request_id, "result": {"ok": True}}
-        if method == "session/new":
-            params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-            if "skills" in params:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {"code": -32602, "message": "invalid params: unknown field skills"},
-                }
-            if "mcpServers" in params:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {"code": -32602, "message": "invalid params: unknown field mcpServers"},
-                }
-            return {"jsonrpc": "2.0", "id": request_id, "result": {"session_id": "acp_sess_2"}}
-        if method == "session/prompt":
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "assistant_text": "ok after degrade",
-                    "tool_calls": [],
-                    "finish_reason": "stop",
-                },
-            }
-        if method == "session/close":
-            return {"jsonrpc": "2.0", "id": request_id, "result": {"closed": True}}
-        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32601, "message": "unknown"}}
-
-    def restart(self) -> None:
-        return
-
-    def close(self) -> None:
-        return
-
-
-def test_acp_client_session_new_auto_degrades_on_injection_rejection(monkeypatch):
-    transport = _SessionNewRejectTransport(config=ACPClientConfig(command="python3"))
-    monkeypatch.setattr(
-        "perlica.providers.acp_client.StdioACPTransport",
-        lambda config, event_sink=None: transport,
-    )
-    events: List[tuple[str, Dict[str, Any]]] = []
     client = ACPClient(
-        provider_id="claude",
-        config=ACPClientConfig(command="python3"),
-        event_sink=lambda event_type, payload: events.append((event_type, payload)),
+        provider_id="opencode",
+        config=ACPClientConfig(command="opencode", args=["acp"]),
+        codec=OpenCodeACPCodec(),
     )
 
     req = _request()
     req.context["provider_config"] = {
-        "injection_failure_policy": "degrade",
-        "mcp_servers": [{"server_id": "demo", "command": "python3", "args": [], "env": {}}],
-        "skills": [{"skill_id": "demo", "name": "demo"}],
+        "tool_execution_mode": "provider_managed",
     }
     response = client.generate(req)
 
-    assert response.assistant_text == "ok after degrade"
-    session_new_requests = [
-        item.get("params")
-        for item in transport.requests
-        if str(item.get("method") or "") == "session/new"
-    ]
-    assert len(session_new_requests) == 3
-    assert "skills" in (session_new_requests[0] or {})
-    assert "skills" not in (session_new_requests[1] or {})
-    assert "mcpServers" in (session_new_requests[1] or {})
-    assert "mcpServers" not in (session_new_requests[2] or {})
-
-    degraded_events = [payload for name, payload in events if name == "acp.session_new.injection_degraded"]
-    assert len(degraded_events) == 2
-    assert degraded_events[0].get("rejected_field") == "skills"
-    assert degraded_events[1].get("rejected_field") == "mcpServers"
+    assert response.assistant_text == "ok"
+    assert factory.instance is not None
+    session_new = factory.instance.requests[1].get("params") or {}
+    assert isinstance(session_new, dict)
+    assert "mcpServers" in session_new
+    assert session_new.get("mcpServers") == []
 
 
 class _FallbackTransport:
@@ -299,6 +213,7 @@ def test_acp_client_uses_visible_text_fallback_when_prompt_chunks_missing(monkey
     client = ACPClient(
         provider_id="opencode",
         config=ACPClientConfig(command="opencode", args=["acp"]),
+        codec=OpenCodeACPCodec(),
         event_sink=lambda event_type, payload: events.append(event_type),
     )
     response = client.generate(_request())
@@ -306,7 +221,7 @@ def test_acp_client_uses_visible_text_fallback_when_prompt_chunks_missing(monkey
     assert response.finish_reason == "stop"
     assert response.usage.get("input_tokens") == 10
     assert response.usage.get("output_tokens") == 5
-    assert "acp.response.fallback_text_used" in events
+    assert "provider.acp.response.fallback_text_used" in events
 
 
 class _ThoughtOnlyTransport:
@@ -373,12 +288,13 @@ def test_acp_client_does_not_fallback_to_thought_only_chunks(monkeypatch):
     client = ACPClient(
         provider_id="opencode",
         config=ACPClientConfig(command="opencode", args=["acp"]),
+        codec=OpenCodeACPCodec(),
         event_sink=lambda event_type, payload: events.append(event_type),
     )
     response = client.generate(_request())
     assert response.assistant_text == ""
     assert response.finish_reason == "stop"
-    assert "acp.response.fallback_text_used" not in events
+    assert "provider.acp.response.fallback_text_used" not in events
     notifications = response.raw.get("notifications") if isinstance(response.raw, dict) else None
     assert isinstance(notifications, list)
     assert "agent_thought_chunk" in str(notifications[0])
@@ -439,12 +355,13 @@ def test_acp_client_uses_structured_message_output_text_fallback(monkeypatch):
     client = ACPClient(
         provider_id="opencode",
         config=ACPClientConfig(command="opencode", args=["acp"]),
+        codec=OpenCodeACPCodec(),
         event_sink=lambda event_type, payload: events.append(event_type),
     )
     response = client.generate(_request())
     assert response.assistant_text == "来自结构化 output_text 的回复"
     assert response.finish_reason == "stop"
-    assert "acp.response.fallback_text_used" in events
+    assert "provider.acp.response.fallback_text_used" in events
 
 
 class _StructuredThoughtFallbackTransport:
@@ -500,9 +417,105 @@ def test_acp_client_does_not_fallback_to_structured_reasoning_message(monkeypatc
     client = ACPClient(
         provider_id="opencode",
         config=ACPClientConfig(command="opencode", args=["acp"]),
+        codec=OpenCodeACPCodec(),
         event_sink=lambda event_type, payload: events.append(event_type),
     )
     response = client.generate(_request())
     assert response.assistant_text == ""
     assert response.finish_reason == "stop"
-    assert "acp.response.fallback_text_used" not in events
+    assert "provider.acp.response.fallback_text_used" not in events
+
+
+class _CodecBoundaryTransport:
+    def __init__(self, config: ACPClientConfig, event_sink=None) -> None:
+        del config, event_sink
+        self.requests: List[Dict[str, Any]] = []
+
+    def request(self, payload: Dict[str, Any], timeout_sec: int, **kwargs) -> Dict[str, Any]:
+        del timeout_sec, kwargs
+        self.requests.append(payload)
+        method = str(payload.get("method") or "")
+        request_id = str(payload.get("id") or "")
+        if method == "initialize":
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"ok": True}}
+        if method == "session/new":
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"sessionId": "codec_sess"}}
+        if method == "session/prompt":
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"stopReason": "end_turn"}}
+        if method == "session/close":
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"closed": True}}
+        raise AssertionError("unexpected method: {0}".format(method))
+
+    def close(self) -> None:
+        return
+
+
+class _StubCodec(ACPCodec):
+    def __init__(self) -> None:
+        self.build_session_new_called = 0
+        self.build_prompt_called = 0
+        self.normalize_called = 0
+
+    def build_session_new_params(self, *, req: LLMRequest, provider_id: str) -> Dict[str, Any]:
+        del req
+        self.build_session_new_called += 1
+        return {"provider_id": provider_id, "custom_session_new": True}
+
+    def extract_session_id(self, payload: Dict[str, Any]):
+        del payload
+        return "codec_sess", "sessionId"
+
+    def build_prompt_params(
+        self,
+        *,
+        req: LLMRequest,
+        provider_id: str,
+        session_id: str,
+        session_key: str,
+    ) -> Dict[str, Any]:
+        del req
+        self.build_prompt_called += 1
+        return {
+            "provider_id": provider_id,
+            "session_id": session_id,
+            "session_key": session_key,
+            "custom_prompt": True,
+        }
+
+    def normalize_prompt_payload(
+        self,
+        *,
+        payload: Dict[str, Any],
+        notifications: List[Dict[str, Any]] | None,
+        provider_id: str,
+        event_sink=None,
+    ) -> LLMResponse:
+        del payload, notifications, event_sink
+        self.normalize_called += 1
+        return LLMResponse(
+            assistant_text="codec-boundary-ok:{0}".format(provider_id),
+            tool_calls=[],
+            finish_reason="stop",
+        )
+
+
+def test_acp_client_codec_boundary_uses_codec_hooks(monkeypatch):
+    transport = _CodecBoundaryTransport(config=ACPClientConfig(command="python3"))
+    monkeypatch.setattr(
+        "perlica.providers.acp_client.StdioACPTransport",
+        lambda config, event_sink=None: transport,
+    )
+    codec = _StubCodec()
+    client = ACPClient(
+        provider_id="claude",
+        config=ACPClientConfig(command="python3"),
+        codec=codec,
+    )
+
+    response = client.generate(_request())
+    assert response.assistant_text == "codec-boundary-ok:claude"
+    assert codec.build_session_new_called == 1
+    assert codec.build_prompt_called == 1
+    assert codec.normalize_called == 1
+    assert transport.requests[1].get("params", {}).get("custom_session_new") is True
+    assert transport.requests[2].get("params", {}).get("custom_prompt") is True

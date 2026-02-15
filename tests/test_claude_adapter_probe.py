@@ -20,7 +20,6 @@ def test_doctor_reports_missing_adapter_command(isolated_env):
     runtime = Runtime(settings)
     try:
         report = runtime.doctor(verbose=False)
-        assert report["provider_backend"] in {"acp", "legacy_cli"}
         assert report["provider_adapter_probe"] == "missing_command"
         assert report["active_provider"] == "claude"
     finally:

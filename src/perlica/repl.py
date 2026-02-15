@@ -15,6 +15,11 @@ from perlica.config import (
     mark_provider_selected,
     project_config_exists,
 )
+from perlica.providers.static_sync.manager import (
+    format_static_sync_report_lines,
+    static_sync_notice,
+    sync_provider_static_config,
+)
 from perlica.tui.controller import start_tui_chat
 from perlica.tui.service_controller import start_tui_service
 from perlica.security.permission_probe import run_startup_permission_checks
@@ -63,7 +68,8 @@ def start_repl(
     settings = load_settings(context_id=context_id, provider=resolved_provider)
     resolved_provider = settings.provider
 
-    if not _stdin_is_tty():
+    stdin_tty = _stdin_is_tty()
+    if not stdin_tty:
         stdin_text = sys.stdin.read().strip()
         if not stdin_text:
             _echo(
@@ -82,6 +88,12 @@ def start_repl(
             context_id,
             None,
         )
+
+    static_sync_report = sync_provider_static_config(
+        settings=settings,
+        provider_id=resolved_provider,
+    )
+    _emit_static_sync_messages(report=static_sync_report, stream=stream, err_stream=err_stream)
 
     _emit_permission_probe_messages(
         run_startup_permission_checks(
@@ -137,7 +149,8 @@ def start_service_mode(
     settings = load_settings(context_id=context_id, provider=resolved_provider)
     resolved_provider = settings.provider
 
-    if not _stdin_is_tty():
+    stdin_tty = _stdin_is_tty()
+    if not stdin_tty:
         _echo(
             err_stream,
             render_notice(
@@ -147,6 +160,12 @@ def start_service_mode(
             ),
         )
         return 2
+
+    static_sync_report = sync_provider_static_config(
+        settings=settings,
+        provider_id=resolved_provider,
+    )
+    _emit_static_sync_messages(report=static_sync_report, stream=stream, err_stream=err_stream)
 
     _emit_permission_probe_messages(
         run_startup_permission_checks(
@@ -323,3 +342,12 @@ def _emit_permission_probe_messages(report: dict, stream: TextIO) -> None:
                 "Startup permission check failed: {0}".format(key),
             ),
         )
+
+
+def _emit_static_sync_messages(*, report: object, stream: TextIO, err_stream: TextIO) -> None:
+    level, zh_text, en_text, has_failures = static_sync_notice(report)
+    target_stream = err_stream if has_failures else stream
+    _echo(target_stream, render_notice(level, zh_text, en_text))
+
+    for line in format_static_sync_report_lines(report):
+        _echo(target_stream, "  {0}".format(line))

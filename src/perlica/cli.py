@@ -33,6 +33,11 @@ from perlica.kernel.session_store import SessionRecord, SessionStore
 from perlica.kernel.types import ToolCall
 from perlica.prompt.system_prompt import PromptLoadError
 from perlica.providers.base import ProviderError, provider_error_summary
+from perlica.providers.static_sync.manager import (
+    format_static_sync_report_lines,
+    static_sync_notice,
+    sync_provider_static_config,
+)
 from perlica.repl import start_repl, start_service_mode
 from perlica.security.permission_probe import run_startup_permission_checks
 from perlica.ui.render import (
@@ -258,6 +263,11 @@ def _execute_prompt(
 
     settings = load_settings(context_id=context_id, provider=validated_provider)
     resolved_provider = settings.provider
+    static_sync_report = sync_provider_static_config(
+        settings=settings,
+        provider_id=resolved_provider,
+    )
+    _emit_static_sync_report(static_sync_report)
     permission_report = run_startup_permission_checks(
         workspace_dir=settings.workspace_dir,
         trigger_applescript=True,
@@ -372,6 +382,14 @@ def _emit_permission_warnings(report: Dict[str, object]) -> None:
             ),
             err=True,
         )
+
+
+def _emit_static_sync_report(report: object) -> None:
+    level, zh_text, en_text, has_failures = static_sync_notice(report)
+    typer.echo(render_notice(level, zh_text, en_text), err=has_failures)
+
+    for line in format_static_sync_report_lines(report):
+        typer.echo("  " + line, err=has_failures and line.startswith("failed "))
 
 
 def _execute_chat(
@@ -735,6 +753,42 @@ def session_current_cmd(
                 current.provider_locked or "",
             )
         )
+    finally:
+        runtime.close()
+
+
+@session_app.command("delete")
+def session_delete_cmd(
+    session_ref: str = typer.Argument(..., help="会话 ID/名称/前缀 (Session ref)"),
+    context_id: Optional[str] = typer.Option(None, "--context", help="上下文 ID (Perlica context ID)"),
+) -> None:
+    settings = load_settings(context_id=context_id)
+    runtime = Runtime(settings)
+    try:
+        target = runtime.session_store.resolve_session_ref(runtime.context_id, session_ref)
+        current = runtime.session_store.get_current_session(runtime.context_id)
+        if current is not None and target.session_id == current.session_id:
+            typer.echo(
+                render_notice(
+                    "warn",
+                    "禁止删除当前会话，请先切换到其他会话。",
+                    "Cannot delete current session. Switch to another session first.",
+                ),
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
+        runtime.session_store.discard_session(target.session_id)
+        typer.echo(
+            render_notice(
+                "success",
+                "会话已删除：{0}".format(target.session_id),
+                "Session deleted.",
+            )
+        )
+    except ValueError as exc:
+        typer.echo(render_notice("error", str(exc)), err=True)
+        raise typer.Exit(code=2)
     finally:
         runtime.close()
 

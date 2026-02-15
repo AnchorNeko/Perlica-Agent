@@ -29,7 +29,7 @@ provider 合同和错误语义变更属于文档先行（常规强制）。
 2. 返回非结构化结果破坏 runner 期望。  
 3. 修改 tool_calls 结构而不更新类型与测试。
 4. 以“自由文本盲解析”替代 ACP 合同校验主路径。  
-5. 不经 break-glass 开关引入 legacy CLI 直连常态路径。  
+5. 引入 provider fallback 或 legacy CLI 常态路径。
 6. 在 contract 失败时静默吞错（必须事件可观测）。
 7. 将 `session/prompt` 改回本地硬超时，导致思考中调用被误判 timeout。
 8. 把 `agent_thought_chunk` / chain-of-thought 当作最终用户回复输出。
@@ -66,5 +66,5 @@ provider 合同和错误语义变更属于文档先行（常规强制）。
 1. provider contract 测试通过。  
 2. 错误语义清晰可诊断。  
 3. 文档已更新。
-4. ACP-first 主路径稳定，break-glass 路径仅应急可审计。
+4. ACP-first 主路径稳定，无本地 break-glass/fallback 路径。
 5. `opencode` 在“有输出但主解析失败”场景下能回退给用户可见文本，并保留诊断事件。

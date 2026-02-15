@@ -39,6 +39,7 @@ def test_session_prefix_and_new_option_hints(isolated_env):
     assert "/session" in hint.text
     assert "list" in hint.text
     assert "new" in hint.text
+    assert "delete" in hint.text
 
     hint = build_slash_hint("/session new --", state=_state())
     assert "--name" in hint.text
@@ -60,6 +61,31 @@ def test_session_use_shows_dynamic_candidates(isolated_env):
     hint = build_slash_hint("/session use ", state=_state())
     assert "demo-hint" in hint.text
     assert session.session_id[:16] in hint.text
+
+
+def test_session_delete_hint_excludes_current(isolated_env):
+    settings = load_settings(context_id="default")
+    runtime = Runtime(settings)
+    try:
+        current = runtime.session_store.create_session(
+            context_id=runtime.context_id,
+            name="keep-current",
+            is_ephemeral=False,
+        )
+        target = runtime.session_store.create_session(
+            context_id=runtime.context_id,
+            name="delete-target",
+            is_ephemeral=False,
+        )
+        runtime.session_store.set_current_session(runtime.context_id, current.session_id)
+    finally:
+        runtime.close()
+
+    hint = build_slash_hint("/session delete ", state=_state())
+    assert "delete-target" in hint.text
+    assert "keep-current" not in hint.text
+    assert target.session_id[:16] in hint.text
+    assert current.session_id[:16] not in hint.text
 
 
 def test_policy_reset_hints_options_and_risk_values(isolated_env):

@@ -225,8 +225,6 @@ class ServiceOrchestrator:
         )
 
     def _acp_status_text(self) -> str:
-        if self._runtime.settings.provider_backend != "acp":
-            return "-"
         snapshot = self._runtime.acp_activity_snapshot()
         if not isinstance(snapshot, dict):
             return "-"

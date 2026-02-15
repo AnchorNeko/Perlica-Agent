@@ -87,7 +87,7 @@ class StdioACPTransport:
         self._stderr_thread = threading.Thread(target=self._read_stderr_loop, daemon=True)
         self._stdout_thread.start()
         self._stderr_thread.start()
-        self._emit("acp.transport.started", {"command": command})
+        self._emit("provider.acp.transport.started", {"command": command})
 
     def restart(self) -> None:
         self.close()
@@ -149,7 +149,7 @@ class StdioACPTransport:
                 response = self._parse_response_line(line)
                 if response is None:
                     self._emit(
-                        "acp.response.invalid",
+                        "provider.acp.response.invalid",
                         {
                             "reason": "non_json_stdout_line",
                             "line": line[:240],
@@ -167,7 +167,7 @@ class StdioACPTransport:
                     params = response.get("params")
                     params_dict = params if isinstance(params, dict) else {}
                     self._emit(
-                        "acp.notification.received",
+                        "provider.acp.notification.received",
                         {
                             "method": str(response.get("method") or ""),
                             "params": {
@@ -193,12 +193,12 @@ class StdioACPTransport:
                     continue
                 response_id = str(response.get("id") or "")
                 if not response_id:
-                    self._emit("acp.response.invalid", {"reason": "missing_response_id", "line": line[:240]})
+                    self._emit("provider.acp.response.invalid", {"reason": "missing_response_id", "line": line[:240]})
                     raise ProviderProtocolError("acp response missing id")
 
                 if response_id in self._consumed_response_ids:
                     self._emit(
-                        "acp.response.invalid",
+                        "provider.acp.response.invalid",
                         {
                             "reason": "duplicate_response",
                             "request_id": response_id,
@@ -217,7 +217,7 @@ class StdioACPTransport:
 
                 if response_id != request_id:
                     self._emit(
-                        "acp.response.invalid",
+                        "provider.acp.response.invalid",
                         {
                             "reason": "unexpected_response_id",
                             "request_id": request_id,
@@ -272,7 +272,7 @@ class StdioACPTransport:
             self._stderr_thread.join(timeout=1)
         self._stdout_thread = None
         self._stderr_thread = None
-        self._emit("acp.transport.closed", {})
+        self._emit("provider.acp.transport.closed", {})
 
     def _build_env(self) -> Dict[str, str]:
         # Keep base env for stable Python/module startup; allowlist can be

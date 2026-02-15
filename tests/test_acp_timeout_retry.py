@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 
 from perlica.kernel.types import LLMRequest
 from perlica.providers.acp_client import ACPClient
+from perlica.providers.acp_codec_claude import ClaudeACPCodec
 from perlica.providers.acp_transport import ACPTransportTimeout
 from perlica.providers.acp_types import ACPClientConfig
 from perlica.providers.base import ProviderProtocolError, ProviderTransportError
@@ -69,6 +70,7 @@ def test_acp_client_timeout_fails_without_retry(monkeypatch):
     client = ACPClient(
         provider_id="claude",
         config=ACPClientConfig(command="python3", max_retries=2),
+        codec=ClaudeACPCodec(),
         event_sink=lambda event_type, payload: events.append((event_type, payload)),
     )
 
@@ -80,7 +82,7 @@ def test_acp_client_timeout_fails_without_retry(monkeypatch):
 
     assert transport.prompt_calls == 1
     assert transport.restarts == 0
-    timeout_events = [name for name, _ in events if name == "acp.request.timeout"]
+    timeout_events = [name for name, _ in events if name == "provider.acp.request.timeout"]
     assert timeout_events
 
 
@@ -125,6 +127,7 @@ def test_acp_client_does_not_retry_non_retryable_provider_error(monkeypatch):
     client = ACPClient(
         provider_id="claude",
         config=ACPClientConfig(command="python3", max_retries=2),
+        codec=ClaudeACPCodec(),
         event_sink=lambda event_type, payload: None,
     )
 

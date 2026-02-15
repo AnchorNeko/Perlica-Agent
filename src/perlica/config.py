@@ -14,14 +14,12 @@ except ModuleNotFoundError:  # pragma: no cover - fallback for Python 3.9/3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
 from perlica.providers.profile import (
-    ALLOWED_PROVIDER_BACKENDS,
     ALLOWED_PROVIDER_IDS as PROFILE_ALLOWED_PROVIDER_IDS,
     ALLOWED_INJECTION_FAILURE_POLICIES,
     ALLOWED_TOOL_EXECUTION_MODES,
     DEFAULT_ADAPTER_ARGS,
     DEFAULT_ADAPTER_COMMAND,
     DEFAULT_INJECTION_FAILURE_POLICY,
-    DEFAULT_PROVIDER_BACKEND,
     DEFAULT_PROVIDER_ID,
     DEFAULT_TOOL_EXECUTION_MODE,
     ProviderProfile,
@@ -68,7 +66,6 @@ class ProjectConfig:
     default_provider: str = DEFAULT_PROVIDER_ID
     provider_selected: bool = True
     provider_profiles: Dict[str, ProviderProfile] = field(default_factory=default_provider_profiles)
-    provider_backend: str = DEFAULT_PROVIDER_BACKEND
     provider_adapter_command: str = DEFAULT_ADAPTER_COMMAND
     provider_adapter_args: List[str] = field(default_factory=lambda: list(DEFAULT_ADAPTER_ARGS))
     provider_adapter_env_allowlist: List[str] = field(default_factory=list)
@@ -103,7 +100,6 @@ class Settings:
         default_factory=lambda: default_provider_profiles()[DEFAULT_PROVIDER_ID]
     )
     provider_profiles: Dict[str, ProviderProfile] = field(default_factory=default_provider_profiles)
-    provider_backend: str = DEFAULT_PROVIDER_BACKEND
     provider_adapter_command: str = DEFAULT_ADAPTER_COMMAND
     provider_adapter_args: List[str] = field(default_factory=lambda: list(DEFAULT_ADAPTER_ARGS))
     provider_adapter_env_allowlist: List[str] = field(default_factory=list)
@@ -202,13 +198,6 @@ def _normalize_provider(provider: object) -> str:
     candidate = str(provider or DEFAULT_PROVIDER_ID).strip().lower() or DEFAULT_PROVIDER_ID
     if candidate not in PROFILE_ALLOWED_PROVIDER_IDS:
         return DEFAULT_PROVIDER_ID
-    return candidate
-
-
-def _normalize_provider_backend(value: object) -> str:
-    candidate = str(value or DEFAULT_PROVIDER_BACKEND).strip().lower()
-    if candidate not in ALLOWED_PROVIDER_BACKENDS:
-        return DEFAULT_PROVIDER_BACKEND
     return candidate
 
 
@@ -317,6 +306,33 @@ def _resolve_adapter_command(command: str, args: Sequence[str]) -> str:
     return text
 
 
+def _fail_removed_provider_field(path: str) -> None:
+    raise ProjectConfigError(
+        "配置字段已移除：{0}，请删除该字段（Perlica 现仅支持 ACP，且不再支持 fallback）".format(
+            path
+        )
+    )
+
+
+def _validate_removed_provider_fields(data: Dict[str, object]) -> None:
+    providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
+    for provider_id, raw in providers.items():
+        if not isinstance(raw, dict):
+            continue
+        pid = str(provider_id or "").strip()
+        if "backend" in raw:
+            _fail_removed_provider_field("providers.{0}.backend".format(pid))
+        if "fallback" in raw:
+            _fail_removed_provider_field("providers.{0}.fallback".format(pid))
+
+    provider_legacy = data.get("provider") if isinstance(data.get("provider"), dict) else {}
+    if provider_legacy:
+        if "backend" in provider_legacy:
+            _fail_removed_provider_field("provider.backend")
+        if "fallback" in provider_legacy:
+            _fail_removed_provider_field("provider.fallback")
+
+
 def _safe_provider_profiles(data: Dict[str, object]) -> Dict[str, ProviderProfile]:
     defaults = default_provider_profiles()
     parsed: Dict[str, ProviderProfile] = {}
@@ -327,16 +343,12 @@ def _safe_provider_profiles(data: Dict[str, object]) -> Dict[str, ProviderProfil
         default_profile = defaults.get(provider_id) or ProviderProfile(provider_id=provider_id)
         adapter = raw.get("adapter") if isinstance(raw.get("adapter"), dict) else {}
         acp = raw.get("acp") if isinstance(raw.get("acp"), dict) else {}
-        fallback = raw.get("fallback") if isinstance(raw.get("fallback"), dict) else {}
         capabilities = (
             raw.get("capabilities") if isinstance(raw.get("capabilities"), dict) else {}
         )
         profile = ProviderProfile(
             provider_id=provider_id,
             enabled=_safe_bool(raw.get("enabled"), bool(default_profile.enabled)),  # type: ignore[arg-type]
-            backend=_normalize_provider_backend(  # type: ignore[arg-type]
-                raw.get("backend") if raw.get("backend") is not None else default_profile.backend
-            ),
             adapter_command=str(adapter.get("command") or default_profile.adapter_command).strip()
             or default_profile.adapter_command,  # type: ignore[arg-type]
             adapter_args=_safe_string_list(adapter.get("args"), default_profile.adapter_args),  # type: ignore[arg-type]
@@ -363,10 +375,6 @@ def _safe_provider_profiles(data: Dict[str, object]) -> Dict[str, ProviderProfil
             acp_circuit_breaker_enabled=_safe_bool(
                 acp.get("circuit_breaker_enabled"),  # type: ignore[arg-type]
                 default_profile.acp_circuit_breaker_enabled,
-            ),
-            fallback_enabled=_safe_bool(
-                fallback.get("enabled"),  # type: ignore[arg-type]
-                bool(default_profile.fallback_enabled),
             ),
             supports_mcp_config=_safe_bool(
                 capabilities.get("supports_mcp_config"),  # type: ignore[arg-type]
@@ -411,6 +419,8 @@ def _resolve_active_profile(
 
 
 def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
+    _validate_removed_provider_fields(data)
+
     model = data.get("model") if isinstance(data.get("model"), dict) else {}
     providers = data.get("providers") if isinstance(data.get("providers"), dict) else {}
     provider_legacy = data.get("provider") if isinstance(data.get("provider"), dict) else {}
@@ -457,7 +467,6 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
         legacy_profile = ProviderProfile(
             provider_id="claude",
             enabled=True,
-            backend=_normalize_provider_backend(provider_legacy.get("backend")),  # type: ignore[arg-type]
             adapter_command=str(legacy_adapter.get("command") or DEFAULT_ADAPTER_COMMAND).strip() or DEFAULT_ADAPTER_COMMAND,  # type: ignore[arg-type]
             adapter_args=_safe_string_list(legacy_adapter.get("args"), DEFAULT_ADAPTER_ARGS),  # type: ignore[arg-type]
             adapter_env_allowlist=_safe_string_list(legacy_adapter.get("env_allowlist"), []),  # type: ignore[arg-type]
@@ -481,7 +490,6 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
                 legacy_acp.get("circuit_breaker_enabled"),  # type: ignore[arg-type]
                 DEFAULT_ACP_CIRCUIT_BREAKER_ENABLED,
             ),
-            fallback_enabled=False,
             supports_mcp_config=bool(default_legacy_profile.supports_mcp_config),
             supports_skill_config=bool(default_legacy_profile.supports_skill_config),
             tool_execution_mode=default_legacy_profile.tool_execution_mode
@@ -497,7 +505,6 @@ def _parse_project_config_data(data: Dict[str, object]) -> ProjectConfig:
         default_provider=default_provider,
         provider_selected=provider_selected,
         provider_profiles=profiles,
-        provider_backend=active_profile.backend,
         provider_adapter_command=active_profile.adapter_command,
         provider_adapter_args=list(active_profile.adapter_args),
         provider_adapter_env_allowlist=list(active_profile.adapter_env_allowlist),
@@ -555,7 +562,6 @@ def _render_project_config(config: ProjectConfig) -> str:
             [
                 "[providers.{0}]".format(provider_id),
                 "enabled = {0}".format(str(bool(profile.enabled)).lower()),
-                'backend = "{0}"'.format(_normalize_provider_backend(profile.backend)),
                 "",
                 "[providers.{0}.adapter]".format(provider_id),
                 'command = "{0}"'.format(
@@ -582,9 +588,6 @@ def _render_project_config(config: ProjectConfig) -> str:
                 "circuit_breaker_enabled = {0}".format(
                     str(bool(profile.acp_circuit_breaker_enabled)).lower()
                 ),
-                "",
-                "[providers.{0}.fallback]".format(provider_id),
-                "enabled = {0}".format(str(bool(profile.fallback_enabled)).lower()),
                 "",
                 "[providers.{0}.capabilities]".format(provider_id),
                 "supports_mcp_config = {0}".format(str(bool(profile.supports_mcp_config)).lower()),
@@ -872,7 +875,6 @@ def load_settings(
         provider=resolved_provider,
         provider_profile=resolved_profile,
         provider_profiles=dict(project_config.provider_profiles),
-        provider_backend=resolved_profile.backend,
         provider_adapter_command=_resolve_adapter_command(
             resolved_profile.adapter_command,
             resolved_profile.adapter_args,

@@ -24,7 +24,6 @@ def test_doctor_verbose_includes_failure_details(isolated_env, tmp_path: Path):
         assert "permissions" in report
         assert "mcp_servers_loaded" in report
         assert "mcp_servers" in report
-        assert "provider_backend" in report
         assert "acp_adapter_status" in report
         providers = report.get("providers")
         assert isinstance(providers, dict)

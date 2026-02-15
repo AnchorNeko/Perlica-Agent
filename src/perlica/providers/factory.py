@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Optional
 
-from perlica.providers.acp_provider import ACPProvider
 from perlica.providers.acp_types import ACPClientConfig
 from perlica.providers.base import BaseProvider, ProviderInteractionHandler
-from perlica.providers.claude_cli import ClaudeCLIProvider
-from perlica.providers.profile import ALLOWED_PROVIDER_IDS, DEFAULT_PROVIDER_ID, ProviderProfile
+from perlica.providers.claude_acp_provider import ClaudeACPProvider
+from perlica.providers.opencode_acp_provider import OpenCodeACPProvider
+from perlica.providers.profile import (
+    ALLOWED_PROVIDER_IDS,
+    DEFAULT_PROVIDER_ID,
+    OPENCODE_PROVIDER_ID,
+    ProviderProfile,
+)
 
 ProviderEventEmitter = Callable[[str, Dict[str, object], Dict[str, object]], None]
 
@@ -32,16 +37,6 @@ class ProviderFactory:
         if provider_id not in ALLOWED_PROVIDER_IDS:
             raise ValueError("unsupported provider profile: {0}".format(provider_id or "<empty>"))
 
-        if profile.backend == "legacy_cli":
-            if provider_id != DEFAULT_PROVIDER_ID:
-                raise ValueError(
-                    "legacy_cli backend is not supported for provider '{0}'".format(provider_id)
-                )
-            return ClaudeCLIProvider(
-                interaction_handler=self._interaction_handler,
-                interaction_resolver=self._interaction_resolver,
-            )
-
         acp_config = ACPClientConfig(
             command=profile.adapter_command,
             args=list(profile.adapter_args),
@@ -53,21 +48,21 @@ class ProviderFactory:
             circuit_breaker_enabled=bool(profile.acp_circuit_breaker_enabled),
         )
 
-        fallback_provider = None
-        if profile.fallback_enabled:
-            if provider_id != DEFAULT_PROVIDER_ID:
-                raise ValueError(
-                    "fallback is only supported for provider '{0}'".format(DEFAULT_PROVIDER_ID)
-                )
-            fallback_provider = ClaudeCLIProvider(
+        if provider_id == DEFAULT_PROVIDER_ID:
+            return ClaudeACPProvider(
+                provider_id=provider_id,
+                acp_config=acp_config,
+                event_emitter=self._event_emitter,
                 interaction_handler=self._interaction_handler,
                 interaction_resolver=self._interaction_resolver,
             )
-        return ACPProvider(
-            provider_id=provider_id,
-            acp_config=acp_config,
-            fallback_provider=fallback_provider,
-            event_emitter=self._event_emitter,
-            interaction_handler=self._interaction_handler,
-            interaction_resolver=self._interaction_resolver,
-        )
+        if provider_id == OPENCODE_PROVIDER_ID:
+            return OpenCodeACPProvider(
+                provider_id=provider_id,
+                acp_config=acp_config,
+                event_emitter=self._event_emitter,
+                interaction_handler=self._interaction_handler,
+                interaction_resolver=self._interaction_resolver,
+            )
+
+        raise ValueError("unsupported provider profile: {0}".format(provider_id or "<empty>"))

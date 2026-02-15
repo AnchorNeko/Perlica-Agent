@@ -85,4 +85,4 @@ def test_transport_handles_side_request_and_main_response(monkeypatch):
     assert response.get("id") == "req-1"
     assert any(item.get("method") == "session/reply" for item in written)
     assert len(side_responses) == 1
-    assert "acp.notification.received" in events
+    assert "provider.acp.notification.received" in events

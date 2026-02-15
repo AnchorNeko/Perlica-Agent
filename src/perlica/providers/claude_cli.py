@@ -624,42 +624,6 @@ class ClaudeCLIProvider(BaseProvider):
                 continue
             lines.append("{0}: {1}".format(role, content))
 
-        provider_config = ClaudeCLIProvider._resolve_provider_config(req)
-        if provider_config:
-            skill_rows = provider_config.get("skills")
-            if isinstance(skill_rows, list) and skill_rows:
-                lines.append("")
-                lines.append("Configured Perlica skills:")
-                for raw in skill_rows[:24]:
-                    if not isinstance(raw, dict):
-                        continue
-                    skill_id = str(raw.get("id") or raw.get("skill_id") or "").strip()
-                    name = str(raw.get("name") or "").strip()
-                    desc = str(raw.get("description") or "").strip()
-                    if skill_id and name and desc:
-                        lines.append("- {0} ({1}): {2}".format(skill_id, name, desc))
-                    elif skill_id and name:
-                        lines.append("- {0} ({1})".format(skill_id, name))
-                    elif skill_id:
-                        lines.append("- {0}".format(skill_id))
-                    system_prompt = str(raw.get("system_prompt") or "").strip()
-                    if system_prompt:
-                        lines.append("  prompt: {0}".format(system_prompt))
-
-            mcp_rows = provider_config.get("mcp_servers")
-            if isinstance(mcp_rows, list) and mcp_rows:
-                lines.append("")
-                lines.append("Configured MCP servers:")
-                for raw in mcp_rows[:24]:
-                    if not isinstance(raw, dict):
-                        continue
-                    server_name = str(raw.get("name") or raw.get("server_id") or "").strip()
-                    command = str(raw.get("command") or "").strip()
-                    if server_name and command:
-                        lines.append("- {0}: {1}".format(server_name, command))
-                    elif server_name:
-                        lines.append("- {0}".format(server_name))
-
         if req.tools:
             lines.append("")
             lines.append("Available Perlica tools:")
@@ -682,14 +646,6 @@ class ClaudeCLIProvider(BaseProvider):
                 lines.append("- {0}".format(item))
 
         return "\n".join(lines)
-
-    @staticmethod
-    def _resolve_provider_config(req: LLMRequest) -> Dict[str, Any]:
-        context = req.context if isinstance(req.context, dict) else {}
-        provider_config = context.get("provider_config")
-        if isinstance(provider_config, dict):
-            return dict(provider_config)
-        return {}
 
     @staticmethod
     def _content_to_text(content: Any) -> str:

@@ -89,7 +89,7 @@ _TOP_LEVEL_COMMAND_SPECS: Dict[str, CommandSpec] = {
     "choose": CommandSpec(name="choose", values=("<index|text>",), examples=("/choose 1", "/choose 自定义回答")),
     "session": CommandSpec(
         name="session",
-        subcommands=("list", "new", "use", "current"),
+        subcommands=("list", "new", "use", "current", "delete"),
         examples=("/session list", "/session use demo"),
     ),
     "doctor": CommandSpec(
@@ -367,7 +367,7 @@ def _hint_for_root(
 
 
 def _hint_session(args: List[str], trailing_space: bool, state: Optional[ReplState]) -> HintResult:
-    subs = ("list", "new", "use", "current")
+    subs = ("list", "new", "use", "current", "delete")
     if not args:
         return _hint_with(path="/session", suggestions=list(subs), example="/session use demo")
 
@@ -392,6 +392,9 @@ def _hint_session(args: List[str], trailing_space: bool, state: Optional[ReplSta
 
     if sub_token == "use":
         return _hint_session_use(rest=rest, trailing_space=trailing_space, state=state)
+
+    if sub_token == "delete":
+        return _hint_session_delete(rest=rest, trailing_space=trailing_space, state=state)
 
     return _hint_with(path="/session current", suggestions=[], note="该命令无参数。")
 
@@ -471,6 +474,7 @@ def _hint_session_use(rest: List[str], trailing_space: bool, state: Optional[Rep
     candidates = _session_ref_candidates(
         state=state,
         include_ephemeral=include_ephemeral,
+        include_current=True,
         prefix=ref_prefix,
     )
     suggestions: List[str] = []
@@ -480,6 +484,26 @@ def _hint_session_use(rest: List[str], trailing_space: bool, state: Optional[Rep
     if not suggestions:
         suggestions.append("<session_ref>")
     return _hint_with(path="/session use", suggestions=suggestions, example="/session use demo")
+
+
+def _hint_session_delete(rest: List[str], trailing_space: bool, state: Optional[ReplState]) -> HintResult:
+    ref_prefix = ""
+    if rest and not trailing_space:
+        ref_prefix = rest[-1]
+
+    candidates = _session_ref_candidates(
+        state=state,
+        include_ephemeral=True,
+        include_current=False,
+        prefix=ref_prefix,
+    )
+    suggestions = candidates or ["<session_ref>"]
+    return _hint_with(
+        path="/session delete",
+        suggestions=suggestions,
+        example="/session delete demo",
+        note="仅允许删除非当前会话。",
+    )
 
 
 def _hint_doctor(args: List[str], trailing_space: bool) -> HintResult:
@@ -716,6 +740,7 @@ def _session_ref_candidates(
     *,
     state: Optional[ReplState],
     include_ephemeral: bool,
+    include_current: bool,
     prefix: str,
 ) -> List[str]:
     if state is None:
@@ -732,11 +757,15 @@ def _session_ref_candidates(
             context_id=settings.context_id,
             include_ephemeral=include_ephemeral,
         )
+        current = store.get_current_session(settings.context_id)
+        current_id = current.session_id if current else ""
     finally:
         store.close()
 
     refs: List[str] = []
     for session in sessions:
+        if not include_current and current_id and session.session_id == current_id:
+            continue
         if session.name:
             refs.append(session.name)
         refs.append(session.session_id[:16])
@@ -837,7 +866,7 @@ def _dispatch_parts(parts: List[str], state: ReplState, stream: TextIO) -> ReplD
 
 def _dispatch_menu(root: str, stream: TextIO) -> None:
     menu_lines: Dict[str, str] = {
-        "session": "list [--all] | new [--name NAME] [--provider <provider_id>] | use <ref> | current",
+        "session": "list [--all] | new [--name NAME] [--provider <provider_id>] | use <ref> | current | delete <ref>",
         "doctor": "--format json|text [--verbose]",
         "mcp": "list | reload | status",
         "skill": "list | reload",
@@ -1245,6 +1274,37 @@ def _handle_session(args: List[str], state: ReplState, stream: TextIO) -> None:
                     session.session_id,
                     session.name or "",
                     session.provider_locked or "",
+                ),
+            )
+            return
+
+        if sub == "delete":
+            if len(args) < 2:
+                _echo(stream, render_notice("error", "请提供会话引用。", "Session ref is required."))
+                return
+            target = runtime.session_store.resolve_session_ref(runtime.context_id, args[1])
+            current = runtime.session_store.get_current_session(runtime.context_id)
+            if current is not None and target.session_id == current.session_id:
+                _echo(
+                    stream,
+                    render_notice(
+                        "warn",
+                        "禁止删除当前会话，请先切换到其他会话。",
+                        "Cannot delete current session. Switch to another session first.",
+                    ),
+                )
+                return
+            runtime.session_store.discard_session(target.session_id)
+            if current is not None:
+                state.session_ref = current.session_id
+                state.session_name = current.name
+                state.session_is_ephemeral = current.is_ephemeral
+            _echo(
+                stream,
+                render_notice(
+                    "success",
+                    "会话已删除：{0}".format(target.session_id),
+                    "Session deleted.",
                 ),
             )
             return

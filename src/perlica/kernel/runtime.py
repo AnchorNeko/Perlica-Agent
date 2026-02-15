@@ -41,7 +41,6 @@ class Runtime:
         self.workspace_dir = settings.workspace_dir
         self.config: Dict[str, Any] = {
             "provider": settings.provider,
-            "provider_backend": settings.provider_backend,
             "provider_adapter_command": settings.provider_adapter_command,
             "provider_adapter_args": list(settings.provider_adapter_args),
             "provider_adapter_env_allowlist": list(settings.provider_adapter_env_allowlist),
@@ -175,7 +174,7 @@ class Runtime:
             run_id=run_id if run_id else None,
             trace_id=trace_id if trace_id else None,
         )
-        if event_type == "acp.session.failed":
+        if event_type == "provider.acp.session.failed":
             self._acp_session_errors += 1
 
     def _emit_interaction_event(self, event_type: str, payload: Dict[str, Any]) -> None:
@@ -224,10 +223,10 @@ class Runtime:
         )
 
     def _update_acp_activity(self, event_type: str, payload: Dict[str, Any], run_id: str) -> None:
-        if not event_type.startswith("acp."):
+        if not event_type.startswith("provider.acp."):
             return
         with self._acp_activity_lock:
-            if event_type == "acp.request.sent":
+            if event_type == "provider.acp.request.sent":
                 method = str(payload.get("method") or "")
                 if method == "session/prompt":
                     self._acp_activity.update(
@@ -243,7 +242,7 @@ class Runtime:
                         }
                     )
                 return
-            if event_type == "acp.notification.received":
+            if event_type == "provider.acp.notification.received":
                 params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
                 stage = str(params.get("stage") or "")
                 if not stage:
@@ -260,7 +259,11 @@ class Runtime:
                     }
                 )
                 return
-            if event_type in {"acp.request.timeout", "acp.session.closed", "acp.session.failed"}:
+            if event_type in {
+                "provider.acp.request.timeout",
+                "provider.acp.session.closed",
+                "provider.acp.session.failed",
+            }:
                 method = str(payload.get("method") or "")
                 if method and method != "session/prompt":
                     return
@@ -279,8 +282,6 @@ class Runtime:
         return snapshot
 
     def _detect_acp_adapter_status(self) -> str:
-        if self.settings.provider_backend != "acp":
-            return "disabled"
         command = str(self.settings.provider_adapter_command or "").strip()
         if not command:
             return "missing_command"
@@ -484,7 +485,10 @@ class Runtime:
             "permissions": dict(self.permission_report.get("checks") or {}),
             "system_prompt_loaded": bool(self.system_prompt),
             "skill_prompt_injection_enabled": False,
-            "provider_config_injection_enabled": True,
+            "provider_config_injection_enabled": False,
+            "provider_static_sync_enabled": True,
+            "provider_static_sync_scope_mode": "project_first",
+            "provider_static_sync_namespace": "perlica",
             "provider_capabilities": {
                 "supports_mcp_config": bool(self.settings.provider_profile.supports_mcp_config),
                 "supports_skill_config": bool(self.settings.provider_profile.supports_skill_config),
@@ -496,7 +500,6 @@ class Runtime:
             "mcp_servers_loaded": self.mcp_report.loaded_servers,
             "mcp_tools_loaded": self.mcp_report.tool_count,
             "mcp_errors": self.mcp_manager.status().get("errors", {}),
-            "provider_backend": self.settings.provider_backend,
             "acp_adapter_status": self._acp_adapter_status,
             "acp_session_errors": self._acp_session_errors,
             "session_migration": {

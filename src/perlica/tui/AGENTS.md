@@ -35,7 +35,7 @@
 2. 确认是否涉及 session 保存/丢弃弹窗。  
 3. 确认状态文本是否依赖后端字段。
 4. 确认 ACP/contract 事件展示使用标准事件名，而非 provider-specific 细节。
-5. 若展示超时/运行状态，必须参考 `acp.notification.received` 与 `acp.request.timeout` 的组合证据。
+5. 若展示超时/运行状态，必须参考 `provider.acp.notification.received` 与 `provider.acp.request.timeout` 的组合证据。
 
 ## 改动后必跑
 

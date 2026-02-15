@@ -57,6 +57,40 @@ def test_session_command_updates_state(isolated_env):
     assert "当前会话" in stream.getvalue()
 
 
+def test_session_delete_allows_other_but_rejects_current(isolated_env):
+    stream = StringIO()
+    state = _state()
+
+    settings = load_settings(context_id="default")
+    runtime = Runtime(settings)
+    try:
+        keep = runtime.session_store.create_session(context_id=runtime.context_id, name="keep", is_ephemeral=False)
+        drop = runtime.session_store.create_session(context_id=runtime.context_id, name="drop", is_ephemeral=False)
+        runtime.session_store.set_current_session(runtime.context_id, keep.session_id)
+        state.session_ref = keep.session_id
+        state.session_name = keep.name
+        state.session_is_ephemeral = keep.is_ephemeral
+    finally:
+        runtime.close()
+
+    deleted = dispatch_slash_command("/session delete drop", state=state, stream=stream)
+    assert deleted.handled is True
+    assert "会话已删除" in stream.getvalue()
+
+    settings = load_settings(context_id="default")
+    runtime = Runtime(settings)
+    try:
+        assert runtime.session_store.get_session(drop.session_id) is None
+        assert runtime.session_store.get_session(keep.session_id) is not None
+    finally:
+        runtime.close()
+
+    stream = StringIO()
+    rejected = dispatch_slash_command("/session delete keep", state=state, stream=stream)
+    assert rejected.handled is True
+    assert "禁止删除当前会话" in stream.getvalue()
+
+
 def test_save_and_discard_ephemeral_session(isolated_env):
     stream = StringIO()
     state = _state()
@@ -108,6 +142,7 @@ def test_help_command_lists_service_group(isolated_env):
     assert "/service" in output
     assert "/model" not in output
     assert "/session [list [--all]|new [--name NAME]" in output
+    assert "|current|delete <ref>]" in output
 
 
 def test_pending_and_choose_commands_supported(isolated_env):

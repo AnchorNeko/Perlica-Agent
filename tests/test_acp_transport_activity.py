@@ -55,7 +55,7 @@ def test_transport_prompt_notifications_are_emitted_without_local_timeout(monkey
     feeder.join(timeout=5)
     assert response.get("id") == "req-1"
 
-    notification_events = [payload for name, payload in events if name == "acp.notification.received"]
+    notification_events = [payload for name, payload in events if name == "provider.acp.notification.received"]
     assert notification_events
     sample = notification_events[-1]
     assert sample.get("method") == "perlica/session_progress"

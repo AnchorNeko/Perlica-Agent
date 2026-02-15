@@ -128,12 +128,10 @@ class Runner:
 
             skill_selection = self._runtime.skill_engine.select(text)
             self._emit_skill_events(skill_selection, conversation_id, run_id, trace_id)
-            self._current_skill_count = len(skill_selection.selected)
+            self._current_skill_count = len(self._runtime.skill_engine.list_skills())
             self._current_mcp_tools_count = len(self._runtime.mcp_manager.list_tool_specs())
-            provider_config = self._build_provider_config(provider_id, skill_selection)
-            self._current_mcp_context_count = len(
-                [item for item in provider_config.get("mcp_servers", []) if isinstance(item, dict)]
-            )
+            provider_config = self._build_provider_config(provider_id)
+            self._current_mcp_context_count = 0
 
             self._update_progress(
                 "load-context",
@@ -560,21 +558,11 @@ class Runner:
     def _build_provider_config(
         self,
         provider_id: str,
-        selection: SkillSelection,
     ) -> Dict[str, Any]:
         profile = self._resolve_provider_profile(provider_id)
         provider_config: Dict[str, Any] = {}
         if profile is None:
             return provider_config
-
-        if bool(getattr(profile, "supports_mcp_config", False)):
-            mcp_rows = self._normalize_mcp_server_rows(self._runtime.mcp_manager.adapter_mcp_servers_payload())
-            provider_config["mcp_servers"] = mcp_rows
-
-        if bool(getattr(profile, "supports_skill_config", False)):
-            skill_rows = self._serialize_selected_skills(selection)
-            if skill_rows:
-                provider_config["skills"] = skill_rows
 
         tool_execution_mode = str(getattr(profile, "tool_execution_mode", "") or "").strip()
         if tool_execution_mode:
@@ -598,51 +586,6 @@ class Runner:
         if active_profile is not None:
             return active_profile
         return None
-
-    @staticmethod
-    def _normalize_mcp_server_rows(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
-        if not isinstance(payload, dict):
-            return rows
-        for server_id, raw in sorted(payload.items()):
-            if not isinstance(raw, dict):
-                continue
-            row = {
-                "server_id": str(server_id or "").strip(),
-                "command": str(raw.get("command") or "").strip(),
-                "args": [str(item) for item in raw.get("args", []) if str(item).strip()]
-                if isinstance(raw.get("args"), list)
-                else [],
-                "env": dict(raw.get("env") or {}) if isinstance(raw.get("env"), dict) else {},
-            }
-            if row["server_id"] and row["command"]:
-                rows.append(row)
-        return rows
-
-    @staticmethod
-    def _serialize_selected_skills(selection: SkillSelection) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
-        seen_skill_ids: set[str] = set()
-        for skill in selection.selected:
-            skill_id = str(getattr(skill, "skill_id", "") or "").strip()
-            if not skill_id or skill_id in seen_skill_ids:
-                continue
-            seen_skill_ids.add(skill_id)
-            rows.append(
-                {
-                    "skill_id": skill_id,
-                    "name": str(getattr(skill, "name", "") or "").strip(),
-                    "description": str(getattr(skill, "description", "") or "").strip(),
-                    "priority": int(getattr(skill, "priority", 0) or 0),
-                    "triggers": [
-                        str(item).strip().lower()
-                        for item in list(getattr(skill, "triggers", []) or [])
-                        if str(item).strip()
-                    ],
-                    "system_prompt": str(getattr(skill, "system_prompt", "") or ""),
-                }
-            )
-        return rows
 
     @staticmethod
     def _totals_from_call_usages(usages: Sequence[LLMCallUsage]) -> UsageTotals:

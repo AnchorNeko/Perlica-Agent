@@ -9,8 +9,6 @@ from typing import Dict, List
 DEFAULT_PROVIDER_ID = "claude"
 OPENCODE_PROVIDER_ID = "opencode"
 ALLOWED_PROVIDER_IDS = (DEFAULT_PROVIDER_ID, OPENCODE_PROVIDER_ID)
-DEFAULT_PROVIDER_BACKEND = "acp"
-ALLOWED_PROVIDER_BACKENDS = ("acp", "legacy_cli")
 DEFAULT_TOOL_EXECUTION_MODE = "provider_managed"
 ALLOWED_TOOL_EXECUTION_MODES = ("provider_managed",)
 DEFAULT_INJECTION_FAILURE_POLICY = "degrade"
@@ -27,7 +25,6 @@ class ProviderProfile:
 
     provider_id: str
     enabled: bool = True
-    backend: str = DEFAULT_PROVIDER_BACKEND
     adapter_command: str = DEFAULT_ADAPTER_COMMAND
     adapter_args: List[str] = field(default_factory=lambda: list(DEFAULT_ADAPTER_ARGS))
     adapter_env_allowlist: List[str] = field(default_factory=list)
@@ -36,7 +33,6 @@ class ProviderProfile:
     acp_max_retries: int = 2
     acp_backoff: str = "exponential+jitter"
     acp_circuit_breaker_enabled: bool = True
-    fallback_enabled: bool = False
     supports_mcp_config: bool = False
     supports_skill_config: bool = False
     tool_execution_mode: str = DEFAULT_TOOL_EXECUTION_MODE

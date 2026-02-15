@@ -23,7 +23,7 @@ class _CaptureProvider:
         return LLMResponse(assistant_text="ok", tool_calls=[], finish_reason="stop")
 
 
-def test_runner_injects_mcp_context_and_emits_counts(monkeypatch, tmp_path: Path):
+def test_runner_no_longer_injects_mcp_or_skills_into_provider_config(monkeypatch, tmp_path: Path):
     initialize_project_config(workspace_dir=tmp_path)
     settings = load_settings(context_id="default", provider="codex", workspace_dir=tmp_path)
     runtime = Runtime(settings)
@@ -35,17 +35,6 @@ def test_runner_injects_mcp_context_and_emits_counts(monkeypatch, tmp_path: Path
             runtime.mcp_manager,
             "list_tool_specs",
             lambda: [MCPToolSpec(server_id="demo", tool_name="echo")],
-        )
-        monkeypatch.setattr(
-            runtime.mcp_manager,
-            "adapter_mcp_servers_payload",
-            lambda: {
-                "demo": {
-                    "command": "python3",
-                    "args": ["-m", "demo.server"],
-                    "env": {"DEMO": "1"},
-                }
-            },
         )
         session = runtime.session_store.create_session(
             context_id=runtime.context_id,
@@ -62,22 +51,23 @@ def test_runner_injects_mcp_context_and_emits_counts(monkeypatch, tmp_path: Path
         assert req.tools == []
         provider_config = req.context.get("provider_config") if isinstance(req.context, dict) else {}
         assert isinstance(provider_config, dict)
-        mcp_servers = provider_config.get("mcp_servers")
-        assert isinstance(mcp_servers, list)
-        assert mcp_servers and mcp_servers[0].get("server_id") == "demo"
+        assert "mcp_servers" not in provider_config
+        assert "skills" not in provider_config
+        assert provider_config.get("tool_execution_mode") == "provider_managed"
+        assert provider_config.get("injection_failure_policy") == "degrade"
 
         events = runtime.event_log.list_events(limit=200)
         llm_requested = [item for item in events if item.event_type == "llm.requested"]
         assert llm_requested
         payload = llm_requested[-1].payload
         assert int(payload.get("mcp_tools_count") or 0) >= 1
-        assert int(payload.get("mcp_context_blocks_count") or 0) >= 1
-        assert int(payload.get("mcp_provider_config_count") or 0) >= 1
+        assert int(payload.get("mcp_context_blocks_count") or 0) == 0
+        assert int(payload.get("mcp_provider_config_count") or 0) == 0
     finally:
         runtime.close()
 
 
-def test_runner_injects_empty_mcp_servers_for_supported_provider(monkeypatch, tmp_path: Path):
+def test_runner_provider_config_retains_runtime_policy_fields_only(tmp_path: Path):
     initialize_project_config(workspace_dir=tmp_path)
     settings = load_settings(context_id="default", provider="codex", workspace_dir=tmp_path)
     runtime = Runtime(settings)
@@ -85,11 +75,6 @@ def test_runner_injects_empty_mcp_servers_for_supported_provider(monkeypatch, tm
         provider = _CaptureProvider()
         runtime.register_provider(provider)
 
-        monkeypatch.setattr(
-            runtime.mcp_manager,
-            "adapter_mcp_servers_payload",
-            lambda: {},
-        )
         session = runtime.session_store.create_session(
             context_id=runtime.context_id,
             provider_locked="fake",
@@ -101,13 +86,14 @@ def test_runner_injects_empty_mcp_servers_for_supported_provider(monkeypatch, tm
         req = provider.requests[0]
         provider_config = req.context.get("provider_config") if isinstance(req.context, dict) else {}
         assert isinstance(provider_config, dict)
-        assert "mcp_servers" in provider_config
-        assert provider_config.get("mcp_servers") == []
+        assert set(provider_config.keys()) == {"tool_execution_mode", "injection_failure_policy"}
+        assert provider_config.get("tool_execution_mode") == "provider_managed"
+        assert provider_config.get("injection_failure_policy") == "degrade"
     finally:
         runtime.close()
 
 
-def test_runner_provider_capability_gates_mcp_and_skill_injection(monkeypatch, tmp_path: Path):
+def test_runner_provider_capability_flags_no_longer_change_mcp_skill_injection(monkeypatch, tmp_path: Path):
     initialize_project_config(workspace_dir=tmp_path)
     settings = load_settings(context_id="default", provider="codex", workspace_dir=tmp_path)
     settings.provider_profile = replace(
@@ -120,17 +106,6 @@ def test_runner_provider_capability_gates_mcp_and_skill_injection(monkeypatch, t
         provider = _CaptureProvider()
         runtime.register_provider(provider)
 
-        monkeypatch.setattr(
-            runtime.mcp_manager,
-            "adapter_mcp_servers_payload",
-            lambda: {
-                "demo": {
-                    "command": "python3",
-                    "args": ["-m", "demo.server"],
-                    "env": {"DEMO": "1"},
-                }
-            },
-        )
         monkeypatch.setattr(
             runtime.skill_engine,
             "select",
@@ -162,11 +137,12 @@ def test_runner_provider_capability_gates_mcp_and_skill_injection(monkeypatch, t
         assert isinstance(provider_config, dict)
         assert "mcp_servers" not in provider_config
         assert "skills" not in provider_config
+        assert provider_config.get("tool_execution_mode") == "provider_managed"
     finally:
         runtime.close()
 
 
-def test_runner_injects_selected_skills_into_provider_config(monkeypatch, tmp_path: Path):
+def test_runner_loaded_skills_are_counted_but_not_injected(monkeypatch, tmp_path: Path):
     initialize_project_config(workspace_dir=tmp_path)
     settings = load_settings(context_id="default", provider="codex", workspace_dir=tmp_path)
     runtime = Runtime(settings)
@@ -185,8 +161,13 @@ def test_runner_injects_selected_skills_into_provider_config(monkeypatch, tmp_pa
         )
         monkeypatch.setattr(
             runtime.skill_engine,
+            "list_skills",
+            lambda: [skill, skill],
+        )
+        monkeypatch.setattr(
+            runtime.skill_engine,
             "select",
-            lambda text: SkillSelection(selected=[skill, skill], skipped={}),
+            lambda text: SkillSelection(selected=[], skipped={"demo-skill": "trigger_not_matched"}),
         )
         session = runtime.session_store.create_session(
             context_id=runtime.context_id,
@@ -199,10 +180,14 @@ def test_runner_injects_selected_skills_into_provider_config(monkeypatch, tmp_pa
         req = provider.requests[0]
         provider_config = req.context.get("provider_config") if isinstance(req.context, dict) else {}
         assert isinstance(provider_config, dict)
-        skills = provider_config.get("skills")
-        assert isinstance(skills, list)
-        assert len(skills) == 1
-        assert skills[0].get("skill_id") == "demo-skill"
+        assert "skills" not in provider_config
+        assert "mcp_servers" not in provider_config
         assert req.tools == []
+
+        events = runtime.event_log.list_events(limit=200)
+        llm_requested = [item for item in events if item.event_type == "llm.requested"]
+        assert llm_requested
+        payload = llm_requested[-1].payload
+        assert int(payload.get("skills_selected_count") or 0) == 2
     finally:
         runtime.close()

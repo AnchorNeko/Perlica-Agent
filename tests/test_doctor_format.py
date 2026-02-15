@@ -18,7 +18,6 @@ def test_doctor_json_format(isolated_env):
     assert "permissions" in parsed
     assert "mcp_servers_loaded" in parsed
     assert "system_prompt_loaded" in parsed
-    assert "provider_backend" in parsed
     assert "acp_adapter_status" in parsed
 
 
